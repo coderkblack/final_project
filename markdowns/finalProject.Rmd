@@ -1,0 +1,49 @@
+---
+title: "new"
+author: "Jakes Chege"
+date: '`r Sys.Date()`'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 11, fig.height = 7)
+```
+
+```{r packages}
+pkgs <- c("tidyverse", "caret", "randomForest", "xgboost", "nnet",
+          "mgcv", "splines", "corrplot", "ggplot2", "dplyr",
+          "pdp", "vip", "readxl")
+```
+
+Description of the variables in the data
+* $X_1$ 	Relative Compactness
+* $X_2$ 	Surface Area
+* $X_3$ 	Wall Area
+* $X_4$ 	Roof Area
+* $X_5$ 	Overall Height
+* $X_6$ 	Orientation
+* $X_7$ 	Glazing Area
+* $X_8$ 	Glazing Area Distribution
+* $Y_1$ 	Heating Load
+* $Y_2$ 	Cooling Load
+
+
+The variables labeled 
+* $X_i$: attributes (covariates) 
+* $Y_i$: supposed to be outcome variables 
+
+The aim is to use the features to predict each of the outcome responses. Can you think of classification models, regression models (parametric, semi-parametric, non-linear) where possible and be able to perform analysis that can assess the heating load and cooling load requirements of buildings. 
+
+I expect to see very robust analysis and we should have a very well done presentation to assess the overall understanding of this unit as we approach the examination date. 
+
+```{r load-data}
+data <- read_excel("~/Documents/strathmore/Modules/Module 3/linear_models/classwork/notes/ENB2012_data 2.xlsx")
+head(data)
+```
+
+
+```{r}
+summary(data)
+```
+
