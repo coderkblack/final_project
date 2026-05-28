@@ -1,0 +1,304 @@
+Semi-parametric & Nonlinear Models (Y1 — Heating Load)
+```{r}
+# ============================================================
+# 8.7  MODEL 7 — GAM: Generalised Additive Model (Semi-parametric)
+# ============================================================
+gam_y1 <- gam(HeatingLoad ~ s(RelCompactness) + s(SurfaceArea) + s(WallArea) +
+                s(RoofArea) + OverallHeight + Orientation +
+                s(GlazingArea) + GlazingAreaDist,
+              data = train_data, method = "REML")
+summary(gam_y1)
+plot(gam_y1, pages = 1, shade = TRUE, shade.col = "lightblue")
+gam.check(gam_y1)
+
+pred_gam_y1 <- predict(gam_y1, newdata = test_data)
+results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_gam_y1, "GAM"))
+```
+
+
+
+
+```{r}
+# ============================================================
+# 8.8  MODEL 8 — MARS: Multivariate Adaptive Regression Splines (Non-linear)
+# ============================================================
+mars_y1 <- earth(HeatingLoad ~ ., data = train_data[, c(features, "HeatingLoad")],
+                 degree = 2)
+summary(mars_y1)
+plotmo(mars_y1)
+evimp(mars_y1)
+
+pred_mars_y1 <- predict(mars_y1, newdata = test_data)
+results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_mars_y1, "MARS"))
+```
+
+
+
+
+```{r}
+# ============================================================
+# 8.9  MODEL 9 — Regression Tree (Non-parametric)
+# ============================================================
+tree_y1 <- rpart(HeatingLoad ~ ., data = train_data[, c(features, "HeatingLoad")],
+                 control = rpart.control(cp = 0.01))
+rpart.plot(tree_y1, main = "Regression Tree — Heating Load", roundint = FALSE)
+printcp(tree_y1)
+
+optimal_cp <- tree_y1$cptable[which.min(tree_y1$cptable[, "xerror"]), "CP"]
+tree_y1_pruned <- prune(tree_y1, cp = optimal_cp)
+rpart.plot(tree_y1_pruned, main = "Pruned Regression Tree — Heating Load", roundint = FALSE)
+
+pred_tree_y1 <- predict(tree_y1_pruned, newdata = test_data)
+results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_tree_y1, "Regression Tree"))
+```
+
+
+
+
+```{r}
+# ============================================================
+# 8.10  MODEL 10 — Random Forest (Non-parametric, Ensemble)
+# ============================================================
+set.seed(42)
+rf_y1 <- randomForest(HeatingLoad ~ ., data = train_data[, c(features, "HeatingLoad")],
+                       ntree = 500, mtry = 3, importance = TRUE)
+print(rf_y1)
+varImpPlot(rf_y1, main = "Random Forest Variable Importance — Y1")
+importance(rf_y1)
+
+pred_rf_y1 <- predict(rf_y1, newdata = test_data)
+results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_rf_y1, "Random Forest"))
+```
+
+
+
+
+```{r}
+# ============================================================
+# 8.11  MODEL 11 — XGBoost (Non-parametric, Gradient Boosting)
+# ============================================================
+dtrain_y1 <- xgb.DMatrix(data = x_train, label = y_train)
+dtest_y1  <- xgb.DMatrix(data = x_test, label = test_data$HeatingLoad)
+
+params_y1 <- list(
+  objective  = "reg:squarederror",
+  eta        = 0.1,
+  max_depth  = 6,
+  subsample  = 0.8,
+  colsample_bytree = 0.8
+)
+
+xgb_y1 <- xgb.train(params = params_y1, data = dtrain_y1, nrounds = 200,
+                     watchlist = list(train = dtrain_y1, test = dtest_y1),
+                     verbose = 0, early_stopping_rounds = 20)
+
+xgb_imp_y1 <- xgb.importance(model = xgb_y1)
+xgb.plot.importance(xgb_imp_y1, top_n = 8, main = "XGBoost Feature Importance — Y1")
+
+pred_xgb_y1 <- predict(xgb_y1, newdata = dtest_y1)
+results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_xgb_y1, "XGBoost"))
+```
+
+
+
+
+```{r}
+# ============================================================
+# 8.12  MODEL 12 — SVM Regression (Non-parametric, Kernel)
+# ============================================================
+svm_y1 <- svm(HeatingLoad ~ ., data = train_data[, c(features, "HeatingLoad")],
+              type = "eps-regression", kernel = "radial", cost = 10, epsilon = 0.1)
+summary(svm_y1)
+
+pred_svm_y1 <- predict(svm_y1, newdata = test_data)
+results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_svm_y1, "SVM (RBF)"))
+```
+
+
+
+
+```{r}
+# ============================================================
+# 8.13  MODEL 13 — Neural Network Regression (Non-linear)
+# ============================================================
+preproc <- preProcess(train_data[, features], method = c("center", "scale"))
+train_scaled <- predict(preproc, train_data[, features])
+test_scaled  <- predict(preproc, test_data[, features])
+train_scaled$HeatingLoad <- train_data$HeatingLoad
+
+set.seed(42)
+nn_y1 <- nnet(HeatingLoad ~ ., data = train_scaled, size = 10,
+              linout = TRUE, maxit = 500, decay = 0.01, trace = FALSE)
+
+pred_nn_y1 <- predict(nn_y1, newdata = test_scaled)
+results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_nn_y1, "Neural Network"))
+```
+
+
+
+
+```{r}
+# ============================================================
+# 8.14  MODEL 14 — k-Nearest Neighbors Regression (Non-parametric)
+# ============================================================
+set.seed(42)
+knn_ctrl <- trainControl(method = "cv", number = 10)
+knn_y1 <- train(HeatingLoad ~ ., data = train_data[, c(features, "HeatingLoad")],
+                method = "knn",
+                trControl = knn_ctrl,
+                tuneGrid = data.frame(k = c(3, 5, 7, 9, 11, 15)))
+print(knn_y1)
+plot(knn_y1)
+
+pred_knn_y1 <- predict(knn_y1, newdata = test_data)
+results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_knn_y1, "k-NN Regression"))
+```
+
+
+```{r}
+# ============================================================
+# 8.16  COMPARISON TABLE — ALL MODELS FOR Y1
+# ============================================================
+results_y1 <- results_y1 %>% arrange(RMSE)
+cat("\n========== Y1: HEATING LOAD — MODEL COMPARISON ==========\n")
+print(results_y1, row.names = FALSE)
+
+ggplot(results_y1, aes(x = reorder(Model, RMSE), y = RMSE)) +
+  geom_col(fill = "steelblue", alpha = 0.8) +
+  geom_text(aes(label = round(RMSE, 3)), hjust = -0.1, size = 3) +
+  coord_flip() +
+  labs(title = "Model Comparison — Heating Load (Y1)", x = "Model", y = "RMSE (Test Set)") +
+  theme_minimal()
+
+ggplot(results_y1, aes(x = reorder(Model, -R2), y = R2)) +
+  geom_col(fill = "darkgreen", alpha = 0.7) +
+  geom_text(aes(label = round(R2, 4)), hjust = -0.1, size = 3) +
+  coord_flip() +
+  labs(title = "R² Comparison — Heating Load (Y1)", x = "Model", y = "R²") +
+  theme_minimal()
+```
+
+(Y2 — Cooling Load)
+
+
+```{r}
+# --- 9.7  GAM ---
+gam_y2 <- gam(CoolingLoad ~ s(RelCompactness) + s(SurfaceArea) + s(WallArea) +
+                s(RoofArea) + OverallHeight + Orientation +
+                s(GlazingArea) + GlazingAreaDist,
+              data = train_data, method = "REML")
+summary(gam_y2)
+plot(gam_y2, pages = 1, shade = TRUE, shade.col = "lightyellow")
+
+pred_gam_y2 <- predict(gam_y2, newdata = test_data)
+results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_gam_y2, "GAM"))
+```
+
+
+
+
+```{r}
+# --- 9.8  MARS ---
+mars_y2 <- earth(CoolingLoad ~ ., data = train_data[, c(features, "CoolingLoad")], degree = 2)
+summary(mars_y2)
+
+pred_mars_y2 <- predict(mars_y2, newdata = test_data)
+results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_mars_y2, "MARS"))
+```
+
+
+
+
+```{r}
+# --- 9.9  Regression Tree ---
+tree_y2 <- rpart(CoolingLoad ~ ., data = train_data[, c(features, "CoolingLoad")])
+optimal_cp_y2 <- tree_y2$cptable[which.min(tree_y2$cptable[, "xerror"]), "CP"]
+tree_y2_pruned <- prune(tree_y2, cp = optimal_cp_y2)
+rpart.plot(tree_y2_pruned, main = "Pruned Regression Tree — Cooling Load")
+
+pred_tree_y2 <- predict(tree_y2_pruned, newdata = test_data)
+results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_tree_y2, "Regression Tree"))
+```
+
+
+
+
+```{r}
+# --- 9.10  Random Forest ---
+set.seed(42)
+rf_y2 <- randomForest(CoolingLoad ~ ., data = train_data[, c(features, "CoolingLoad")],
+                       ntree = 500, mtry = 3, importance = TRUE)
+varImpPlot(rf_y2, main = "RF Variable Importance — Y2")
+
+pred_rf_y2 <- predict(rf_y2, newdata = test_data)
+results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_rf_y2, "Random Forest"))
+```
+
+
+
+
+```{r}
+# --- 9.11  XGBoost ---
+dtrain_y2 <- xgb.DMatrix(data = x_train, label = y_train_y2)
+dtest_y2  <- xgb.DMatrix(data = x_test, label = test_data$CoolingLoad)
+xgb_y2 <- xgb.train(params = params_y1, data = dtrain_y2, nrounds = 200,
+                     watchlist = list(train = dtrain_y2, test = dtest_y2),
+                     verbose = 0, early_stopping_rounds = 20)
+
+pred_xgb_y2 <- predict(xgb_y2, newdata = dtest_y2)
+results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_xgb_y2, "XGBoost"))
+```
+
+
+
+
+```{r}
+# --- 9.12  SVM ---
+svm_y2 <- svm(CoolingLoad ~ ., data = train_data[, c(features, "CoolingLoad")],
+              type = "eps-regression", kernel = "radial", cost = 10, epsilon = 0.1)
+
+pred_svm_y2 <- predict(svm_y2, newdata = test_data)
+results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_svm_y2, "SVM (RBF)"))
+```
+
+
+
+
+```{r}
+# --- 9.13  Neural Network ---
+train_scaled$CoolingLoad <- train_data$CoolingLoad
+set.seed(42)
+nn_y2 <- nnet(CoolingLoad ~ ., data = train_scaled, size = 10,
+              linout = TRUE, maxit = 500, decay = 0.01, trace = FALSE)
+
+pred_nn_y2 <- predict(nn_y2, newdata = test_scaled)
+results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_nn_y2, "Neural Network"))
+```
+
+
+
+
+```{r}
+# --- 9.14  k-NN ---
+knn_y2 <- train(CoolingLoad ~ ., data = train_data[, c(features, "CoolingLoad")],
+                method = "knn", trControl = knn_ctrl,
+                tuneGrid = data.frame(k = c(3, 5, 7, 9, 11, 15)))
+
+pred_knn_y2 <- predict(knn_y2, newdata = test_data)
+results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_knn_y2, "k-NN Regression"))
+```
+
+
+```{r}
+# --- 9.16  Comparison ---
+results_y2 <- results_y2 %>% arrange(RMSE)
+cat("\n========== Y2: COOLING LOAD — MODEL COMPARISON ==========\n")
+print(results_y2, row.names = FALSE)
+
+ggplot(results_y2, aes(x = reorder(Model, RMSE), y = RMSE)) +
+  geom_col(fill = "darkorange", alpha = 0.8) +
+  geom_text(aes(label = round(RMSE, 3)), hjust = -0.1, size = 3) +
+  coord_flip() +
+  labs(title = "Model Comparison — Cooling Load (Y2)", x = "Model", y = "RMSE") +
+  theme_minimal()
+```
