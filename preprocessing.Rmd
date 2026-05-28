@@ -1,0 +1,60 @@
+FEATURE ENGINEERING & TRANSFORMATION CHECKS
+```{r}
+# ============================================================
+# 7.1  Check if log transformations help Y1 and Y2
+# ============================================================
+par(mfrow = c(2, 2))
+hist(df$HeatingLoad, breaks = 30, main = "Y1: Heating Load", col = "lightblue")
+hist(log(df$HeatingLoad), breaks = 30, main = "log(Y1)", col = "lightgreen")
+hist(df$CoolingLoad, breaks = 30, main = "Y2: Cooling Load", col = "lightblue")
+hist(log(df$CoolingLoad), breaks = 30, main = "log(Y2)", col = "lightgreen")
+par(mfrow = c(1, 1))
+```
+
+
+
+
+```{r}
+# ============================================================
+# 7.2  Box-Cox transformation recommendation
+# ============================================================
+bc_y1 <- MASS::boxcox(lm(HeatingLoad ~ ., data = df %>% select(RelCompactness:HeatingLoad)))
+lambda_y1 <- bc_y1$x[which.max(bc_y1$y)]
+cat("Optimal Box-Cox lambda for Y1:", lambda_y1, "\n")
+
+bc_y2 <- MASS::boxcox(lm(CoolingLoad ~ ., data = df %>% select(RelCompactness:RoofArea,
+                          OverallHeight:GlazingAreaDist, CoolingLoad)))
+lambda_y2 <- bc_y2$x[which.max(bc_y2$y)]
+cat("Optimal Box-Cox lambda for Y2:", lambda_y2, "\n")
+```
+
+
+
+
+```{r}
+# ============================================================
+# 7.3  Check for polynomial relationships
+# ============================================================
+ggplot(df, aes(x = RelCompactness, y = HeatingLoad)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(method = "lm", formula = y ~ x, color = "blue", se = FALSE) +
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2), color = "red", se = FALSE) +
+  geom_smooth(method = "loess", color = "green", se = FALSE) +
+  labs(title = "Linear (blue) vs Quadratic (red) vs LOESS (green)",
+       subtitle = "RelCompactness → Heating Load") +
+  theme_minimal()
+```
+
+
+```{r}
+# ============================================================
+# 7.4  Create derived features (for experimentation)
+# ============================================================
+df <- df %>%
+  mutate(
+    CompactnessXHeight   = RelCompactness * OverallHeight,
+    WallToRoofRatio      = WallArea / RoofArea,
+    GlazingXCompactness  = GlazingArea * RelCompactness,
+    SurfToVol            = SurfaceArea / (WallArea + RoofArea)
+  )
+```

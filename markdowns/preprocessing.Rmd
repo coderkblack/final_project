@@ -1,0 +1,527 @@
+---
+title: "ENB2012 — Feature Engineering & Preprocessing"
+author: "Josh, Kosen, Kariuki"
+date: '`r Sys.Date()`'
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    number_sections: true
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 11, fig.height = 6)
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 11, fig.height = 6)
+```
+
+---
+
+# Package Installation & Loading
+
+```{r packages}
+pkgs <- c(
+  "tidyverse", "caret", "MASS", "car", "moments",
+  "readxl", "writexl", "ggplot2", "gridExtra",
+  "corrplot", "GGally", "mgcv", "splines"
+)
+
+not_installed <- pkgs[!pkgs %in% rownames(installed.packages())]
+if (length(not_installed) > 0) {
+  install.packages(not_installed, dependencies = TRUE)
+}
+
+invisible(lapply(pkgs, library, character.only = TRUE))
+
+cat("All packages loaded successfully.\n")
+```
+
+---
+
+# Load Data from EDA Output
+
+We load the post-EDA Excel file produced at the end of `EDA.Rmd`.
+This file already has renamed columns, factor variants (`_f`), and
+an `is_outlier` flag column.
+
+```{r load-data}
+df <- read_excel("~/Documents/strathmore/Modules/Module 3/linear_models/classwork/final_project/markdowns/new_data/ENB2012_post_EDA.xlsx")
+
+cat("Dimensions:", nrow(df), "rows x", ncol(df), "columns\n")
+cat("Columns:", paste(names(df), collapse = ", "), "\n\n")
+
+glimpse(df)
+```
+
+---
+
+# Restore Factor Variables
+
+Excel does not preserve R factor types. We restore them from the raw
+numeric columns that were carried over.
+
+```{r restore-factors}
+df$Orientation_f <- factor(
+  df$Orientation,
+  levels = 2:5,
+  labels = c("N", "E", "S", "W")
+)
+
+df$OverallHeight_f <- factor(
+  df$OverallHeight,
+  levels = c(3.5, 7.0),
+  labels = c("Low_3.5m", "High_7m")
+)
+
+df$GlazingArea_f <- factor(
+  df$GlazingArea,
+  levels = c(0, 0.1, 0.25, 0.4),
+  labels = c("None", "Low_10pct", "Med_25pct", "High_40pct")
+)
+
+df$GlazingAreaDist_f <- factor(
+  df$GlazingAreaDist,
+  levels = 0:5,
+  labels = c("None", "Uniform", "N_heavy", "E_heavy", "S_heavy", "W_heavy")
+)
+
+cat("Factor levels restored:\n")
+cat("  Orientation_f    :", levels(df$Orientation_f), "\n")
+cat("  OverallHeight_f  :", levels(df$OverallHeight_f), "\n")
+cat("  GlazingArea_f    :", levels(df$GlazingArea_f), "\n")
+cat("  GlazingAreaDist_f:", levels(df$GlazingAreaDist_f), "\n")
+```
+
+---
+
+# Outlier Handling
+
+The `is_outlier` flag was computed in EDA using the IQR method across
+all numeric predictors and responses. We inspect the flagged rows and
+decide on a strategy.
+
+## Inspect flagged rows
+
+```{r outlier-inspect}
+cat("Total rows flagged as outliers:", sum(df$is_outlier, na.rm = TRUE), "\n")
+cat("Percentage:", round(mean(df$is_outlier, na.rm = TRUE) * 100, 2), "%\n\n")
+
+# Preview flagged rows
+df %>%
+  filter(is_outlier == TRUE) %>%
+  dplyr::select(RelCompactness:CoolingLoad) %>%
+  summary()
+```
+
+Since there are no outliers, we keep the data as it is.
+
+# Response Variable Transformation
+
+## Visual check: raw vs log
+
+```{r log-check}
+par(mfrow = c(2, 2))
+
+hist(df_clean$HeatingLoad,      breaks = 30, col = "lightblue",
+     main = "Y1: Heating Load (raw)", xlab = "HeatingLoad")
+hist(log(df_clean$HeatingLoad), breaks = 30, col = "lightgreen",
+     main = "log(Y1): Heating Load",  xlab = "log(HeatingLoad)")
+
+hist(df_clean$CoolingLoad,      breaks = 30, col = "lightblue",
+     main = "Y2: Cooling Load (raw)", xlab = "CoolingLoad")
+hist(log(df_clean$CoolingLoad), breaks = 30, col = "lightgreen",
+     main = "log(Y2): Cooling Load",  xlab = "log(CoolingLoad)")
+
+par(mfrow = c(1, 1))
+```
+
+## Box-Cox optimal lambda — Y1 (Heating Load)
+
+Box-Cox is fitted on a numeric-only subset (SurfaceArea excluded due
+to perfect collinearity identified in EDA; Orientation and
+GlazingAreaDist kept as numeric here for the Box-Cox linear model).
+
+```{r boxcox-y1}
+df_bc_y1 <- df_clean %>%
+  dplyr::select(RelCompactness, WallArea, RoofArea,
+         OverallHeight, Orientation, GlazingArea,
+         GlazingAreaDist, HeatingLoad)
+
+bc_y1      <- MASS::boxcox(lm(HeatingLoad ~ ., data = df_bc_y1),
+                            lambda = seq(-2, 2, 0.05), plotit = TRUE)
+lambda_y1  <- bc_y1$x[which.max(bc_y1$y)]
+
+cat("Optimal Box-Cox lambda for Y1 (Heating Load):", lambda_y1, "\n")
+
+# Apply transformation
+if (abs(lambda_y1) < 0.05) {
+  df_clean$HeatingLoad_bc <- log(df_clean$HeatingLoad)
+  cat("Applied: log transformation (lambda ≈ 0)\n")
+} else {
+  df_clean$HeatingLoad_bc <- (df_clean$HeatingLoad ^ lambda_y1 - 1) / lambda_y1
+  cat("Applied: Box-Cox with lambda =", lambda_y1, "\n")
+}
+```
+
+## Box-Cox optimal lambda — Y2 (Cooling Load)
+
+```{r boxcox-y2}
+df_bc_y2 <- df_clean %>%
+  dplyr::select(RelCompactness, WallArea, RoofArea,
+         OverallHeight, Orientation, GlazingArea,
+         GlazingAreaDist, CoolingLoad)
+
+bc_y2      <- MASS::boxcox(lm(CoolingLoad ~ ., data = df_bc_y2),
+                            lambda = seq(-2, 2, 0.05), plotit = TRUE)
+lambda_y2  <- bc_y2$x[which.max(bc_y2$y)]
+
+cat("Optimal Box-Cox lambda for Y2 (Cooling Load):", lambda_y2, "\n")
+
+if (abs(lambda_y2) < 0.05) {
+  df_clean$CoolingLoad_bc <- log(df_clean$CoolingLoad)
+  cat("Applied: log transformation (lambda ≈ 0)\n")
+} else {
+  df_clean$CoolingLoad_bc <- (df_clean$CoolingLoad ^ lambda_y2 - 1) / lambda_y2
+  cat("Applied: Box-Cox with lambda =", lambda_y2, "\n")
+}
+```
+
+## QQ-plots after transformation
+
+```{r qq-transformed}
+par(mfrow = c(2, 2))
+
+qqnorm(df_clean$HeatingLoad,    main = "Q-Q: Y1 raw")
+qqline(df_clean$HeatingLoad,    col = "red", lwd = 2)
+
+qqnorm(df_clean$HeatingLoad_bc, main = "Q-Q: Y1 Box-Cox transformed")
+qqline(df_clean$HeatingLoad_bc, col = "steelblue", lwd = 2)
+
+qqnorm(df_clean$CoolingLoad,    main = "Q-Q: Y2 raw")
+qqline(df_clean$CoolingLoad,    col = "red", lwd = 2)
+
+qqnorm(df_clean$CoolingLoad_bc, main = "Q-Q: Y2 Box-Cox transformed")
+qqline(df_clean$CoolingLoad_bc, col = "steelblue", lwd = 2)
+
+par(mfrow = c(1, 1))
+```
+
+---
+
+# Multicollinearity & VIF Review
+
+SurfaceArea was found in EDA to be perfectly collinear with
+WallArea + RoofArea. We drop it from the modelling set and confirm
+VIF scores are acceptable for the remaining predictors.
+
+```{r vif}
+vif_model <- lm(
+  HeatingLoad ~ RelCompactness + WallArea + RoofArea +
+                OverallHeight + Orientation + GlazingArea + GlazingAreaDist,
+  data = df_clean
+)
+
+vif_vals <- car::vif(vif_model)
+
+vif_table <- data.frame(
+  Variable = names(vif_vals),
+  VIF      = round(vif_vals, 3),
+  Flag     = ifelse(vif_vals > 10, "HIGH — consider dropping",
+             ifelse(vif_vals > 5,  "Moderate — monitor", "OK"))
+)
+
+print(vif_table)
+```
+We will keep them all, and accept the VIF. This is because Random Forest, XGBoost, and GAMs are not affected by multicollinearity at all. High VIF only damages OLS coefficient interpretation, not prediction accuracy.
+---
+
+# Polynomial Relationship Check (all predictors)
+
+We extend the single-predictor check from `preprocessing.Rmd` to
+cover all continuous predictors against both outcomes, so we know
+which quadratic terms are worth including as engineered features.
+
+```{r poly-check, fig.height=10}
+cont_preds <- c("RelCompactness", "WallArea", "RoofArea",
+                "OverallHeight", "GlazingArea")
+
+make_poly_plots <- function(response_var, point_col) {
+  lapply(cont_preds, function(v) {
+    ggplot(df_clean, aes(x = .data[[v]], y = .data[[response_var]])) +
+      geom_point(alpha = 0.25, size = 0.7, color = point_col) +
+      geom_smooth(method = "lm",  formula = y ~ x,
+                  color = "steelblue", se = FALSE, linewidth = 0.8) +
+      geom_smooth(method = "lm",  formula = y ~ poly(x, 2),
+                  color = "tomato", se = FALSE, linewidth = 0.8) +
+      geom_smooth(method = "loess",
+                  color = "forestgreen", se = FALSE,
+                  linewidth = 0.8, linetype = "dashed") +
+      labs(title = paste(v, "→", response_var),
+           subtitle = "Blue=linear  Red=quadratic  Green=LOESS",
+           x = v, y = response_var) +
+      theme_minimal(base_size = 9)
+  })
+}
+
+p_y1 <- make_poly_plots("HeatingLoad", "steelblue")
+do.call(gridExtra::grid.arrange, c(p_y1, ncol = 3,
+  list(top = "Polynomial check — Heating Load (Y1)")))
+
+p_y2 <- make_poly_plots("CoolingLoad", "darkorange")
+do.call(gridExtra::grid.arrange, c(p_y2, ncol = 3,
+  list(top = "Polynomial check — Cooling Load (Y2)")))
+```
+
+---
+
+# Feature Engineering
+
+## Interaction and ratio features
+
+Physically motivated engineered features based on the scatter plots
+and domain interpretation from EDA.
+
+```{r feature-engineering}
+df_clean <- df_clean %>%
+  mutate(
+    # --- Original four from preprocessing.Rmd ---
+    CompactnessXHeight  = RelCompactness * OverallHeight,
+    WallToRoofRatio     = WallArea / RoofArea,
+    GlazingXCompactness = GlazingArea * RelCompactness,
+    SurfToVol           = SurfaceArea / (WallArea + RoofArea),
+
+    # --- Additional physically motivated features ---
+    GlazingXHeight      = GlazingArea * OverallHeight,
+    # Tall buildings with more glazing lose/gain disproportionately more heat
+
+    WallXGlazing        = WallArea * GlazingArea,
+    # Interaction between exposed wall and window area
+
+    CompactnessSquared  = RelCompactness^2,
+    # Captures the nonlinear compactness-load relationship seen in poly plots
+
+    HeightSquared       = OverallHeight^2,
+    # OverallHeight is binary (3.5 / 7.0) so this is less critical,
+    # but retained for completeness in polynomial model pipelines
+
+    GlazingToWall       = GlazingArea / (WallArea + 1),
+    # Facade transparency ratio: proportion of wall that is glass
+
+    EnvelopeArea        = WallArea + RoofArea,
+    # Total heat-exchange envelope (SurfaceArea minus floor, approx)
+
+    WallPerHeight       = WallArea / (OverallHeight + 1)
+    # Normalised wall exposure per unit height
+  )
+
+cat("New features added. Total columns now:", ncol(df_clean), "\n")
+cat("Engineered feature names:\n")
+cat(paste(" -",
+  c("CompactnessXHeight","WallToRoofRatio","GlazingXCompactness",
+    "SurfToVol","GlazingXHeight","WallXGlazing",
+    "CompactnessSquared","HeightSquared","GlazingToWall",
+    "EnvelopeArea","WallPerHeight")), sep = "\n")
+```
+
+## Correlation of engineered features with outcomes
+
+Quick screen to confirm the new features are informative before
+they enter modelling.
+
+```{r feature-corr}
+eng_features <- c(
+  "CompactnessXHeight","WallToRoofRatio","GlazingXCompactness",
+  "SurfToVol","GlazingXHeight","WallXGlazing",
+  "CompactnessSquared","GlazingToWall","EnvelopeArea","WallPerHeight"
+)
+
+cor_eng <- df_clean %>%
+  dplyr::select(all_of(eng_features), HeatingLoad, CoolingLoad) %>%
+  cor(use = "complete.obs")
+
+# Show only correlations with the two outcomes
+cor_with_outcomes <- data.frame(
+  Feature        = eng_features,
+  Cor_HeatingLoad = round(cor_eng[eng_features, "HeatingLoad"], 3),
+  Cor_CoolingLoad = round(cor_eng[eng_features, "CoolingLoad"], 3)
+) %>%
+  arrange(desc(abs(Cor_HeatingLoad)))
+
+print(cor_with_outcomes)
+```
+
+---
+
+# Train / Test Split
+
+The split is done **before** scaling. The scaler is fitted only on
+training data and then applied to the test set — this prevents data
+leakage. We stratify on `OverallHeight_f` because it is the most
+dominant predictor identified in EDA.
+
+```{r train-test-split}
+set.seed(42)
+
+train_idx <- caret::createDataPartition(
+  df_clean$OverallHeight_f,
+  p    = 0.80,
+  list = FALSE
+)
+
+df_train <- df_clean[ train_idx, ]
+df_test  <- df_clean[-train_idx, ]
+
+cat("Training set:", nrow(df_train), "rows\n")
+cat("Test set    :", nrow(df_test),  "rows\n")
+
+# Confirm stratification held
+cat("\nOverallHeight distribution — train:\n")
+print(prop.table(table(df_train$OverallHeight_f)))
+
+cat("\nOverallHeight distribution — test:\n")
+print(prop.table(table(df_test$OverallHeight_f)))
+```
+
+---
+
+# Feature Scaling (Centre + Scale)
+
+Scale-sensitive models (Ridge, Lasso, SVR, KNN, Neural Net) require
+standardised predictors. Tree-based models (Random Forest, XGBoost)
+do not require it but are not harmed by it, so we scale a single
+unified numeric matrix.
+
+Scaling is fitted on **training data only**.
+
+```{r scaling}
+# All numeric predictors — original + engineered
+# Excludes: outcomes, factor columns, is_outlier flag, SurfaceArea (collinear)
+scale_cols <- c(
+  "RelCompactness", "WallArea", "RoofArea",
+  "OverallHeight", "Orientation", "GlazingArea", "GlazingAreaDist",
+  "CompactnessXHeight", "WallToRoofRatio", "GlazingXCompactness",
+  "SurfToVol", "GlazingXHeight", "WallXGlazing",
+  "CompactnessSquared", "GlazingToWall", "EnvelopeArea", "WallPerHeight"
+)
+
+# Fit scaler on training set
+preproc_params <- caret::preProcess(
+  df_train[, scale_cols],
+  method = c("center", "scale")
+)
+
+# Apply to both sets
+df_train[, scale_cols] <- predict(preproc_params, df_train[, scale_cols])
+df_test[, scale_cols]  <- predict(preproc_params, df_test[, scale_cols])
+
+cat("Scaling complete. Parameters fitted on training set only.\n\n")
+
+# Confirm: training set should now have mean ≈ 0, sd ≈ 1
+train_stats <- df_train %>%
+  dplyr::select(all_of(scale_cols)) %>%
+  summarise(across(everything(),
+    list(mean = ~round(mean(.), 4), sd = ~round(sd(.), 4))))
+
+cat("Sample check (first 3 features) — should be mean≈0, sd≈1:\n")
+print(train_stats[, 1:6])
+```
+
+---
+
+# Dummy Encoding for Regression Models
+
+Some models (OLS, Ridge, Lasso, SVR) require fully numeric input.
+We create a dummy-encoded version of the dataset for those models.
+Tree-based and GAM models will use the factor columns directly.
+
+```{r dummy-encode}
+# Use model.matrix — this one-hot encodes all factor_f columns
+# Drop the intercept column (first column from model.matrix)
+dummy_formula <- ~ RelCompactness + WallArea + RoofArea +
+                   OverallHeight + GlazingArea +
+                   Orientation_f + GlazingAreaDist_f +
+                   CompactnessXHeight + WallToRoofRatio + GlazingXCompactness +
+                   SurfToVol + GlazingXHeight + WallXGlazing +
+                   CompactnessSquared + GlazingToWall + EnvelopeArea + WallPerHeight
+
+X_train_dummy <- model.matrix(dummy_formula, data = df_train)[, -1]
+X_test_dummy  <- model.matrix(dummy_formula, data = df_test)[, -1]
+
+cat("Dummy-encoded training matrix:", nrow(X_train_dummy), "x",
+    ncol(X_train_dummy), "\n")
+cat("Dummy-encoded test matrix    :", nrow(X_test_dummy),  "x",
+    ncol(X_test_dummy),  "\n")
+cat("Columns:", paste(colnames(X_train_dummy), collapse = ", "), "\n")
+```
+
+---
+
+# Final Dataset Summary
+
+```{r final-summary}
+cat("============================================================\n")
+cat("  PREPROCESSING COMPLETE — SUMMARY\n")
+cat("============================================================\n\n")
+
+cat("Source file   : ENB2012_post_EDA.xlsx\n")
+cat("Outlier method: Winsorising (1st–99th pct) on continuous predictors\n")
+cat("Y1 transform  : Box-Cox (lambda =", lambda_y1, ")\n")
+cat("Y2 transform  : Box-Cox (lambda =", lambda_y2, ")\n")
+cat("SurfaceArea   : DROPPED (perfectly collinear with WallArea + RoofArea)\n")
+cat("Scaling       : Centre + scale, fit on train only\n\n")
+
+cat("Engineered features (11):\n")
+cat("  CompactnessXHeight, WallToRoofRatio, GlazingXCompactness,\n")
+cat("  SurfToVol, GlazingXHeight, WallXGlazing, CompactnessSquared,\n")
+cat("  GlazingToWall, EnvelopeArea, WallPerHeight, HeightSquared\n\n")
+
+cat("Training rows:", nrow(df_train), "\n")
+cat("Test rows    :", nrow(df_test),  "\n")
+cat("Total columns in df_clean:", ncol(df_clean), "\n")
+cat("Dummy-encoded predictor columns:", ncol(X_train_dummy), "\n\n")
+
+cat("Objects available for modelling:\n")
+cat("  df_train       — scaled training dataframe (factors intact)\n")
+cat("  df_test        — scaled test dataframe (factors intact)\n")
+cat("  X_train_dummy  — numeric matrix, dummy-encoded (for OLS/Ridge/SVR)\n")
+cat("  X_test_dummy   — numeric matrix, dummy-encoded (for OLS/Ridge/SVR)\n")
+cat("  preproc_params — caret preProcess object (for inverse-transforming)\n")
+cat("  lambda_y1      — Box-Cox lambda for HeatingLoad\n")
+cat("  lambda_y2      — Box-Cox lambda for CoolingLoad\n")
+```
+
+---
+
+# Export
+
+```{r export}
+library(writexl)
+
+write_xlsx(
+  list(
+    full_clean = df_clean,
+    train      = df_train,
+    test       = df_test
+  ),
+  "new_data/ENB2012_preprocessed.xlsx"
+)
+
+# Also save the dummy matrices as CSV for Python interoperability
+write.csv(as.data.frame(X_train_dummy), "new_data/X_train_dummy.csv", row.names = FALSE)
+write.csv(as.data.frame(X_test_dummy),  "new_data/X_test_dummy.csv",  row.names = FALSE)
+
+# Save the scaler params so they can be re-applied to new data
+saveRDS(preproc_params, "new_data/preproc_params.rds")
+saveRDS(list(lambda_y1 = lambda_y1, lambda_y2 = lambda_y2), "new_data/boxcox_lambdas.rds")
+
+cat("Exported:\n")
+cat("  ENB2012_preprocessed.xlsx  — full_clean / train / test sheets\n")
+cat("  X_train_dummy.csv          — dummy-encoded train matrix\n")
+cat("  X_test_dummy.csv           — dummy-encoded test matrix\n")
+cat("  preproc_params.rds         — caret scaler object\n")
+cat("  boxcox_lambdas.rds         — Box-Cox lambda values\n")
+```
