@@ -1,0 +1,221 @@
+REGRESSION MODELLING (Y1 — Heating Load Regression Models)
+
+```{r}
+# ============================================================
+# 8.0  Train / Test split  (70/30)
+# ============================================================
+set.seed(42)
+train_idx <- createDataPartition(df$HeatingLoad, p = 0.7, list = FALSE)
+
+features <- c("RelCompactness", "SurfaceArea", "WallArea", "RoofArea",
+              "OverallHeight", "Orientation", "GlazingArea", "GlazingAreaDist")
+
+train_data <- df[train_idx, ]
+test_data  <- df[-train_idx, ]
+
+eval_reg <- function(actual, predicted, model_name) {
+  rmse <- sqrt(mean((actual - predicted)^2))
+  mae  <- mean(abs(actual - predicted))
+  r2   <- 1 - sum((actual - predicted)^2) / sum((actual - mean(actual))^2)
+  cat(sprintf("%-30s  RMSE=%.4f  MAE=%.4f  R²=%.4f\n", model_name, rmse, mae, r2))
+  return(data.frame(Model = model_name, RMSE = rmse, MAE = mae, R2 = r2))
+}
+
+results_y1 <- data.frame()
+```
+
+
+
+
+```{r}
+# ============================================================
+# 8.1  MODEL 1 — Multiple Linear Regression (Parametric)
+# ============================================================
+lm_y1 <- lm(HeatingLoad ~ RelCompactness + SurfaceArea + WallArea + RoofArea +
+               OverallHeight + Orientation + GlazingArea + GlazingAreaDist,
+             data = train_data)
+summary(lm_y1)
+
+par(mfrow = c(2, 2))
+plot(lm_y1)
+par(mfrow = c(1, 1))
+
+lmtest::bptest(lm_y1)
+lmtest::dwtest(lm_y1)
+car::vif(lm_y1)
+
+pred_lm_y1 <- predict(lm_y1, newdata = test_data)
+results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_lm_y1, "Linear Regression"))
+```
+
+
+
+
+```{r}
+# ============================================================
+# 8.2  MODEL 2 — Polynomial Regression (Non-linear Parametric)
+# ============================================================
+lm_poly_y1 <- lm(HeatingLoad ~ poly(RelCompactness, 2) + poly(SurfaceArea, 2) +
+                    poly(WallArea, 2) + RoofArea + OverallHeight + Orientation +
+                    poly(GlazingArea, 2) + GlazingAreaDist,
+                  data = train_data)
+summary(lm_poly_y1)
+
+pred_poly_y1 <- predict(lm_poly_y1, newdata = test_data)
+results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_poly_y1, "Polynomial Regression"))
+```
+
+
+
+```{r}
+# ============================================================
+# 8.3  MODEL 3 — Stepwise Regression (AIC-based, Parametric)
+# ============================================================
+step_y1 <- MASS::stepAIC(lm_y1, direction = "both", trace = FALSE)
+summary(step_y1)
+
+pred_step_y1 <- predict(step_y1, newdata = test_data)
+results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_step_y1, "Stepwise Regression"))
+```
+
+
+
+
+```{r}
+# ============================================================
+# 8.4  MODEL 4 — Ridge Regression (Parametric, Regularised)
+# ============================================================
+x_train <- model.matrix(HeatingLoad ~ ., data = train_data[, c(features, "HeatingLoad")])[, -1]
+y_train <- train_data$HeatingLoad
+x_test  <- model.matrix(HeatingLoad ~ ., data = test_data[, c(features, "HeatingLoad")])[, -1]
+
+ridge_y1 <- cv.glmnet(x_train, y_train, alpha = 0, nfolds = 10)
+plot(ridge_y1)
+cat("Best Ridge lambda:", ridge_y1$lambda.min, "\n")
+
+pred_ridge_y1 <- predict(ridge_y1, s = ridge_y1$lambda.min, newx = x_test)
+results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_ridge_y1, "Ridge Regression"))
+```
+
+
+
+
+```{r}
+# ============================================================
+# 8.5  MODEL 5 — Lasso Regression (Parametric, Regularised)
+# ============================================================
+lasso_y1 <- cv.glmnet(x_train, y_train, alpha = 1, nfolds = 10)
+plot(lasso_y1)
+cat("Best Lasso lambda:", lasso_y1$lambda.min, "\n")
+cat("Lasso coefficients:\n")
+print(coef(lasso_y1, s = "lambda.min"))
+
+pred_lasso_y1 <- predict(lasso_y1, s = lasso_y1$lambda.min, newx = x_test)
+results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_lasso_y1, "Lasso Regression"))
+```
+
+
+
+
+```{r}
+# ============================================================
+# 8.6  MODEL 6 — Elastic Net (Parametric, Regularised)
+# ============================================================
+enet_y1 <- cv.glmnet(x_train, y_train, alpha = 0.5, nfolds = 10)
+pred_enet_y1 <- predict(enet_y1, s = enet_y1$lambda.min, newx = x_test)
+results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_enet_y1, "Elastic Net"))
+```
+
+
+```{r}
+# ============================================================
+# 8.15  MODEL 15 — Partial Least Squares (Parametric, dimension reduction)
+# ============================================================
+pls_y1 <- plsr(HeatingLoad ~ ., data = train_data[, c(features, "HeatingLoad")],
+               ncomp = 6, validation = "CV")
+summary(pls_y1)
+validationplot(pls_y1, val.type = "MSEP")
+
+ncomp_opt <- which.min(pls_y1$validation$PRESS)
+pred_pls_y1 <- predict(pls_y1, newdata = test_data, ncomp = ncomp_opt)
+results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_pls_y1, "PLS Regression"))
+```
+
+REGRESSION MODELLING (Y2 — Cooling Load Regression Models)
+```{r}
+results_y2 <- data.frame()
+
+# --- 9.1  Linear Regression ---
+lm_y2 <- lm(CoolingLoad ~ RelCompactness + SurfaceArea + WallArea + RoofArea +
+               OverallHeight + Orientation + GlazingArea + GlazingAreaDist,
+             data = train_data)
+summary(lm_y2)
+par(mfrow = c(2, 2)); plot(lm_y2); par(mfrow = c(1, 1))
+
+pred_lm_y2 <- predict(lm_y2, newdata = test_data)
+results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_lm_y2, "Linear Regression"))
+```
+
+
+
+```{r}
+# --- 9.2  Polynomial Regression ---
+lm_poly_y2 <- lm(CoolingLoad ~ poly(RelCompactness, 2) + poly(SurfaceArea, 2) +
+                    poly(WallArea, 2) + RoofArea + OverallHeight + Orientation +
+                    poly(GlazingArea, 2) + GlazingAreaDist,
+                  data = train_data)
+
+pred_poly_y2 <- predict(lm_poly_y2, newdata = test_data)
+results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_poly_y2, "Polynomial Regression"))
+```
+
+
+
+
+```{r}
+# --- 9.3  Stepwise ---
+step_y2 <- MASS::stepAIC(lm_y2, direction = "both", trace = FALSE)
+pred_step_y2 <- predict(step_y2, newdata = test_data)
+results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_step_y2, "Stepwise Regression"))
+```
+
+
+
+
+```{r}
+# --- 9.4  Ridge ---
+y_train_y2 <- train_data$CoolingLoad
+ridge_y2 <- cv.glmnet(x_train, y_train_y2, alpha = 0, nfolds = 10)
+pred_ridge_y2 <- predict(ridge_y2, s = ridge_y2$lambda.min, newx = x_test)
+results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_ridge_y2, "Ridge Regression"))
+```
+
+
+
+
+```{r}
+# --- 9.5  Lasso ---
+lasso_y2 <- cv.glmnet(x_train, y_train_y2, alpha = 1, nfolds = 10)
+pred_lasso_y2 <- predict(lasso_y2, s = lasso_y2$lambda.min, newx = x_test)
+results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_lasso_y2, "Lasso Regression"))
+```
+
+
+
+
+```{r}
+# --- 9.6  Elastic Net ---
+enet_y2 <- cv.glmnet(x_train, y_train_y2, alpha = 0.5, nfolds = 10)
+pred_enet_y2 <- predict(enet_y2, s = enet_y2$lambda.min, newx = x_test)
+results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_enet_y2, "Elastic Net"))
+```
+
+
+```{r}
+# --- 9.15  PLS ---
+pls_y2 <- plsr(CoolingLoad ~ ., data = train_data[, c(features, "CoolingLoad")],
+               ncomp = 6, validation = "CV")
+ncomp_opt_y2 <- which.min(pls_y2$validation$PRESS)
+pred_pls_y2 <- predict(pls_y2, newdata = test_data, ncomp = ncomp_opt_y2)
+results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_pls_y2, "PLS Regression"))
+```

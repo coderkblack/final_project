@@ -1,0 +1,327 @@
+# Regression Modelling
+
+This file covers the parametric regression models applied to both target variables in the energy efficiency dataset. The goal is to predict heating load and cooling load from eight building characteristics, namely relative compactness, surface area, wall area, roof area, overall height, orientation, glazing area, and glazing area distribution. All models in this file make explicit structural assumptions about the relationship between the predictors and the outcome, which makes them interpretable and relatively straightforward to diagnose. The dataset is split into a 70% training set and a 30% test set, and model performance is evaluated using RMSE, MAE, and R squared on the held-out test data.
+
+---
+
+## Y1 — Heating Load
+
+Heating load represents the amount of energy a building requires to maintain a comfortable indoor temperature during cold conditions. It is a direct function of how well the building envelope retains heat, so features like relative compactness and overall height are expected to carry most of the explanatory weight. The models below are fitted to the training data and then evaluated on the test set.
+
+### Setup
+```{r packages}
+pkgs <- c("tidyverse", "caret", "randomForest", "xgboost", "nnet",
+          "mgcv", "splines", "corrplot", "ggplot2", "ggplot", "dplyr",
+          "pdp", "vip", "readxl")
+```
+
+```{r}
+df <- read_excel("Data after preprocessing is done")
+# ============================================================
+# 8.0  Train / Test split  (70/30)
+# ============================================================
+set.seed(42)
+train_idx <- createDataPartition(df$HeatingLoad, p = 0.7, list = FALSE)
+
+features <- c("RelCompactness", "SurfaceArea", "WallArea", "RoofArea",
+              "OverallHeight", "Orientation", "GlazingArea", "GlazingAreaDist")
+
+train_data <- df[train_idx, ]
+test_data  <- df[-train_idx, ]
+
+eval_reg <- function(actual, predicted, model_name) {
+  rmse <- sqrt(mean((actual - predicted)^2))
+  mae  <- mean(abs(actual - predicted))
+  r2   <- 1 - sum((actual - predicted)^2) / sum((actual - mean(actual))^2)
+  cat(sprintf("%-30s  RMSE=%.4f  MAE=%.4f  R²=%.4f\n", model_name, rmse, mae, r2))
+  return(data.frame(Model = model_name, RMSE = rmse, MAE = mae, R2 = r2))
+}
+
+results_y1 <- data.frame()
+```
+
+### Model 1 — Multiple Linear Regression
+
+Multiple linear regression is the natural starting point for any regression task. It fits a straight line through the data in eight-dimensional space, assuming that each predictor contributes a fixed, additive amount to the predicted heating load regardless of the values of the other predictors. While this assumption is rarely perfectly met in practice, the model is easy to interpret and provides a useful performance baseline. Diagnostic plots and hypothesis tests are included to check for violations of the classical assumptions, including non-constant variance and autocorrelation, and variance inflation factors are computed to flag any multicollinearity concerns.
+
+```{r}
+# ============================================================
+# 8.1  MODEL 1 — Multiple Linear Regression (Parametric)
+# ============================================================
+lm_y1 <- lm(HeatingLoad ~ RelCompactness + SurfaceArea + WallArea + RoofArea +
+               OverallHeight + Orientation + GlazingArea + GlazingAreaDist,
+             data = train_data)
+summary(lm_y1)
+
+par(mfrow = c(2, 2))
+plot(lm_y1)
+par(mfrow = c(1, 1))
+
+lmtest::bptest(lm_y1)
+lmtest::dwtest(lm_y1)
+car::vif(lm_y1)
+
+pred_lm_y1 <- predict(lm_y1, newdata = test_data)
+results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_lm_y1, "Linear Regression"))
+```
+
+### Model 2 — Polynomial Regression
+
+Polynomial regression extends the linear model by including squared terms for selected predictors, allowing the model to capture curvature in the relationships. For heating load, features like relative compactness and glazing area are plausible candidates for nonlinear effects given the physical nature of how they influence thermal performance. Second-degree polynomial terms are added for those predictors while the remaining features stay linear, keeping the model from becoming unnecessarily complex.
+
+```{r}
+# ============================================================
+# 8.2  MODEL 2 — Polynomial Regression (Non-linear Parametric)
+# ============================================================
+lm_poly_y1 <- lm(HeatingLoad ~ poly(RelCompactness, 2) + poly(SurfaceArea, 2) +
+                    poly(WallArea, 2) + RoofArea + OverallHeight + Orientation +
+                    poly(GlazingArea, 2) + GlazingAreaDist,
+                  data = train_data)
+summary(lm_poly_y1)
+
+pred_poly_y1 <- predict(lm_poly_y1, newdata = test_data)
+results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_poly_y1, "Polynomial Regression"))
+```
+
+### Model 3 — Stepwise Regression
+
+Stepwise regression uses the Akaike Information Criterion to search for the best subset of predictors by iteratively adding and removing variables. Starting from the full linear model, it explores both forward and backward directions simultaneously. This is useful for identifying whether any predictors are genuinely redundant and for producing a more parsimonious model without sacrificing much predictive accuracy.
+
+```{r}
+# ============================================================
+# 8.3  MODEL 3 — Stepwise Regression (AIC-based, Parametric)
+# ============================================================
+step_y1 <- MASS::stepAIC(lm_y1, direction = "both", trace = FALSE)
+summary(step_y1)
+
+pred_step_y1 <- predict(step_y1, newdata = test_data)
+results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_step_y1, "Stepwise Regression"))
+```
+
+### Model 4 — Ridge Regression
+
+Ridge regression is a regularised extension of ordinary least squares that shrinks the coefficient estimates towards zero by adding a penalty on their squared magnitude. This helps when predictors are correlated with one another, stabilising the estimates and reducing variance at the cost of introducing a small amount of bias. The penalty strength is controlled by the lambda parameter, which is selected here through 10-fold cross-validation.
+
+```{r}
+# ============================================================
+# 8.4  MODEL 4 — Ridge Regression (Parametric, Regularised)
+# ============================================================
+x_train <- model.matrix(HeatingLoad ~ ., data = train_data[, c(features, "HeatingLoad")])[, -1]
+y_train <- train_data$HeatingLoad
+x_test  <- model.matrix(HeatingLoad ~ ., data = test_data[, c(features, "HeatingLoad")])[, -1]
+
+ridge_y1 <- cv.glmnet(x_train, y_train, alpha = 0, nfolds = 10)
+plot(ridge_y1)
+cat("Best Ridge lambda:", ridge_y1$lambda.min, "\n")
+
+pred_ridge_y1 <- predict(ridge_y1, s = ridge_y1$lambda.min, newx = x_test)
+results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_ridge_y1, "Ridge Regression"))
+```
+
+### Model 5 — Lasso Regression
+
+Lasso regression applies a different kind of regularisation penalty, this time on the absolute values of the coefficients rather than their squares. The practical consequence of this choice is that Lasso can shrink some coefficients all the way to exactly zero, effectively performing variable selection as part of the fitting process. Inspecting which predictors survive with non-zero coefficients gives an indication of which building features are most relevant to heating load.
+
+```{r}
+# ============================================================
+# 8.5  MODEL 5 — Lasso Regression (Parametric, Regularised)
+# ============================================================
+lasso_y1 <- cv.glmnet(x_train, y_train, alpha = 1, nfolds = 10)
+plot(lasso_y1)
+cat("Best Lasso lambda:", lasso_y1$lambda.min, "\n")
+cat("Lasso coefficients:\n")
+print(coef(lasso_y1, s = "lambda.min"))
+
+pred_lasso_y1 <- predict(lasso_y1, s = lasso_y1$lambda.min, newx = x_test)
+results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_lasso_y1, "Lasso Regression"))
+```
+
+### Model 6 — Elastic Net
+
+Elastic Net combines the Ridge and Lasso penalties into a single framework, blending them in equal proportion here with alpha set to 0.5. This gives the model the variable selection capability of Lasso while retaining the grouping behaviour of Ridge, which tends to be more stable when predictors are correlated. It is a reasonable middle ground when there is uncertainty about which regularisation approach is better suited to the data.
+
+```{r}
+# ============================================================
+# 8.6  MODEL 6 — Elastic Net (Parametric, Regularised)
+# ============================================================
+enet_y1 <- cv.glmnet(x_train, y_train, alpha = 0.5, nfolds = 10)
+pred_enet_y1 <- predict(enet_y1, s = enet_y1$lambda.min, newx = x_test)
+results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_enet_y1, "Elastic Net"))
+```
+
+### Model 15 — Partial Least Squares
+
+Partial Least Squares regression is a dimension reduction approach that constructs new composite predictors, called components, by finding directions in the feature space that explain both the variance in the predictors and the variance in the outcome simultaneously. It is particularly well suited to situations where predictors are highly correlated. Cross-validation is used to identify the optimal number of components to retain.
+
+```{r}
+# ============================================================
+# 8.15  MODEL 15 — Partial Least Squares (Parametric, dimension reduction)
+# ============================================================
+pls_y1 <- plsr(HeatingLoad ~ ., data = train_data[, c(features, "HeatingLoad")],
+               ncomp = 6, validation = "CV")
+summary(pls_y1)
+validationplot(pls_y1, val.type = "MSEP")
+
+ncomp_opt <- which.min(pls_y1$validation$PRESS)
+pred_pls_y1 <- predict(pls_y1, newdata = test_data, ncomp = ncomp_opt)
+results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_pls_y1, "PLS Regression"))
+```
+
+### Y1 — Model Comparison
+
+The results from all six regression models are now brought together and ranked by RMSE. Lower RMSE values indicate better predictive accuracy on the held-out test set. The R squared charts complement this by showing how much of the variance in heating load each model accounts for.
+
+```{r}
+# ============================================================
+# Y1 COMPARISON — Regression Models Only
+# ============================================================
+results_y1 <- results_y1 %>% arrange(RMSE)
+cat("\n========== Y1: HEATING LOAD — REGRESSION MODEL COMPARISON ==========\n")
+print(results_y1, row.names = FALSE)
+
+ggplot(results_y1, aes(x = reorder(Model, RMSE), y = RMSE)) +
+  geom_col(fill = "steelblue", alpha = 0.8) +
+  geom_text(aes(label = round(RMSE, 3)), hjust = -0.1, size = 3) +
+  coord_flip() +
+  labs(title = "Regression Model Comparison — Heating Load (Y1)",
+       x = "Model", y = "RMSE (Test Set)") +
+  theme_minimal()
+
+ggplot(results_y1, aes(x = reorder(Model, -R2), y = R2)) +
+  geom_col(fill = "darkgreen", alpha = 0.7) +
+  geom_text(aes(label = round(R2, 4)), hjust = -0.1, size = 3) +
+  coord_flip() +
+  labs(title = "R² Comparison — Heating Load (Y1)",
+       x = "Model", y = "R²") +
+  theme_minimal()
+```
+
+---
+
+## Y2 — Cooling Load
+
+Cooling load reflects the energy needed to keep a building cool during warm conditions. While it shares the same set of predictors as heating load, the relationships are not necessarily symmetric. Glazing area, for instance, may have a stronger influence on cooling load because glass surfaces allow solar radiation to enter the building and raise indoor temperatures. The same suite of regression models is applied here to allow a direct comparison between the two targets.
+
+### Setup
+
+```{r}
+results_y2 <- data.frame()
+```
+
+### Model 1 — Multiple Linear Regression
+
+As with heating load, the linear regression model serves as the interpretable baseline. It assumes additive, constant effects for each building feature and provides a reference point against which more flexible models can be judged.
+
+```{r}
+# --- 9.1  Linear Regression ---
+lm_y2 <- lm(CoolingLoad ~ RelCompactness + SurfaceArea + WallArea + RoofArea +
+               OverallHeight + Orientation + GlazingArea + GlazingAreaDist,
+             data = train_data)
+summary(lm_y2)
+par(mfrow = c(2, 2)); plot(lm_y2); par(mfrow = c(1, 1))
+
+pred_lm_y2 <- predict(lm_y2, newdata = test_data)
+results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_lm_y2, "Linear Regression"))
+```
+
+### Model 2 — Polynomial Regression
+
+Polynomial terms are added to the same predictors as in the heating load model to capture potential curvature. Given that cooling load depends on solar gain and ventilation dynamics, nonlinear effects in features like surface area and glazing area seem physically plausible.
+
+```{r}
+# --- 9.2  Polynomial Regression ---
+lm_poly_y2 <- lm(CoolingLoad ~ poly(RelCompactness, 2) + poly(SurfaceArea, 2) +
+                    poly(WallArea, 2) + RoofArea + OverallHeight + Orientation +
+                    poly(GlazingArea, 2) + GlazingAreaDist,
+                  data = train_data)
+
+pred_poly_y2 <- predict(lm_poly_y2, newdata = test_data)
+results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_poly_y2, "Polynomial Regression"))
+```
+
+### Model 3 — Stepwise Regression
+
+Stepwise selection is applied to the cooling load linear model using the same bidirectional AIC search. Comparing which predictors survive here versus in the heating load model may reveal differences in how building geometry relates to the two energy demands.
+
+```{r}
+# --- 9.3  Stepwise ---
+step_y2 <- MASS::stepAIC(lm_y2, direction = "both", trace = FALSE)
+pred_step_y2 <- predict(step_y2, newdata = test_data)
+results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_step_y2, "Stepwise Regression"))
+```
+
+### Model 4 — Ridge Regression
+
+Ridge regression is fitted for cooling load using the same cross-validated lambda selection approach. The design matrices from the heating load setup are reused since the predictor set is identical.
+
+```{r}
+# --- 9.4  Ridge ---
+y_train_y2 <- train_data$CoolingLoad
+ridge_y2 <- cv.glmnet(x_train, y_train_y2, alpha = 0, nfolds = 10)
+pred_ridge_y2 <- predict(ridge_y2, s = ridge_y2$lambda.min, newx = x_test)
+results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_ridge_y2, "Ridge Regression"))
+```
+
+### Model 5 — Lasso Regression
+
+Lasso is applied to cooling load to see whether the same set of predictors that survived for heating load are retained here, or whether the sparsity pattern differs between the two targets.
+
+```{r}
+# --- 9.5  Lasso ---
+lasso_y2 <- cv.glmnet(x_train, y_train_y2, alpha = 1, nfolds = 10)
+pred_lasso_y2 <- predict(lasso_y2, s = lasso_y2$lambda.min, newx = x_test)
+results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_lasso_y2, "Lasso Regression"))
+```
+
+### Model 6 — Elastic Net
+
+The Elastic Net is fitted with the same alpha value of 0.5, balancing Ridge and Lasso shrinkage equally. Any difference in performance relative to the pure Lasso or Ridge models would suggest that neither penalty alone is optimal for this target.
+
+```{r}
+# --- 9.6  Elastic Net ---
+enet_y2 <- cv.glmnet(x_train, y_train_y2, alpha = 0.5, nfolds = 10)
+pred_enet_y2 <- predict(enet_y2, s = enet_y2$lambda.min, newx = x_test)
+results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_enet_y2, "Elastic Net"))
+```
+
+### Model 15 — Partial Least Squares
+
+PLS regression is fitted for cooling load with cross-validation again used to select the number of components. Given that the predictors are the same as those used for heating load, the optimal number of components may differ if the variance structure of the predictors aligns differently with cooling load.
+
+```{r}
+# --- 9.15  PLS ---
+pls_y2 <- plsr(CoolingLoad ~ ., data = train_data[, c(features, "CoolingLoad")],
+               ncomp = 6, validation = "CV")
+ncomp_opt_y2 <- which.min(pls_y2$validation$PRESS)
+pred_pls_y2 <- predict(pls_y2, newdata = test_data, ncomp = ncomp_opt_y2)
+results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_pls_y2, "PLS Regression"))
+```
+
+### Y2 — Model Comparison
+
+The six regression models for cooling load are ranked below by test set RMSE. Comparing this table to the equivalent table for heating load gives an immediate sense of whether cooling load is a more or less difficult prediction target under purely parametric assumptions.
+
+```{r}
+# ============================================================
+# Y2 COMPARISON — Regression Models Only
+# ============================================================
+results_y2 <- results_y2 %>% arrange(RMSE)
+cat("\n========== Y2: COOLING LOAD — REGRESSION MODEL COMPARISON ==========\n")
+print(results_y2, row.names = FALSE)
+
+ggplot(results_y2, aes(x = reorder(Model, RMSE), y = RMSE)) +
+  geom_col(fill = "darkorange", alpha = 0.8) +
+  geom_text(aes(label = round(RMSE, 3)), hjust = -0.1, size = 3) +
+  coord_flip() +
+  labs(title = "Regression Model Comparison — Cooling Load (Y2)",
+       x = "Model", y = "RMSE (Test Set)") +
+  theme_minimal()
+
+ggplot(results_y2, aes(x = reorder(Model, -R2), y = R2)) +
+  geom_col(fill = "darkgreen", alpha = 0.7) +
+  geom_text(aes(label = round(R2, 4)), hjust = -0.1, size = 3) +
+  coord_flip() +
+  labs(title = "R² Comparison — Cooling Load (Y2)",
+       x = "Model", y = "R²") +
+  theme_minimal()
+```
