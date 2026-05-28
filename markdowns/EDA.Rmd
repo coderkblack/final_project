@@ -379,15 +379,6 @@ vif(prelim_model_fixed)
 ```
 When VIF scores are this high (especially those over 100), it tells us that your independent variables are not truly independent.
 
-
-```r
-
-
-
-
-
-```
-
 ```{r}
 # ============================================================
 # 6.1  Boxplot-based outlier identification
