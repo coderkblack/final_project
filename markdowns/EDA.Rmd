@@ -145,7 +145,7 @@ do.call(grid.arrange, c(p_hist, ncol = 3))
 ```{r}
 library(tidyverse)
 df_long <- df %>%
-  select(RelCompactness:CoolingLoad) %>%
+  dplyr::select(RelCompactness:CoolingLoad) %>%
   pivot_longer(everything(), names_to = "Variable", values_to = "Value")
 
 ggplot(df_long, aes(x = Variable, y = Value, fill = Variable)) +
@@ -333,7 +333,7 @@ df %>%
 
 # 5.1  Pearson correlation matrix
 ```{r}
-cor_matrix <- cor(df %>% select(RelCompactness:CoolingLoad), method = "pearson")
+cor_matrix <- cor(df %>% dplyr::select(RelCompactness:CoolingLoad), method = "pearson")
 round(cor_matrix, 3)
 ```
 ```{r}
@@ -393,7 +393,7 @@ detect_outliers <- function(x) {
 }
 
 cat("Outlier counts (IQR method):\n")
-sapply(df %>% select(RelCompactness:CoolingLoad), detect_outliers)
+sapply(df %>% dplyr::select(RelCompactness:CoolingLoad), detect_outliers)
 ```
 
 
@@ -406,3 +406,36 @@ plot(cooks_d, type = "h", main = "Cook's Distance", ylab = "Cook's D")
 abline(h = 4 / nrow(df), col = "red", lty = 2)
 cat("Influential points (Cook's D > 4/n):", sum(cooks_d > 4/nrow(df)), "\n")
 ```
+```{r}
+# ============================================================
+# EXPORT: Save EDA-processed dataframe for preprocessing
+# ============================================================
+library(writexl)
+
+# The df at this point already has:
+#   - Renamed columns
+#   - Factor versions of categorical vars (_f columns)
+#   - Missing/duplicate checks done
+#   - Outlier flags known
+
+# Add outlier flag column before export (useful for preprocessing decisions)
+flag_outlier_rows <- function(df_num) {
+  apply(df_num, 1, function(row) {
+    any(sapply(seq_along(row), function(i) {
+      q1 <- quantile(df_num[[i]], 0.25)
+      q3 <- quantile(df_num[[i]], 0.75)
+      iqr <- q3 - q1
+      row[i] < (q1 - 1.5 * iqr) | row[i] > (q3 + 1.5 * iqr)
+    }))
+  })
+}
+
+df$is_outlier <- flag_outlier_rows(df %>% dplyr::select(RelCompactness:CoolingLoad))
+cat("Rows flagged as outliers:", sum(df$is_outlier), "\n")
+
+write_xlsx(df, "new_data/ENB2012_post_EDA.xlsx")
+cat("Exported: ENB2012_post_EDA.xlsx\n")
+cat("Dimensions:", nrow(df), "rows x", ncol(df), "columns\n")
+cat("Columns exported:", paste(names(df), collapse = ", "), "\n")
+```
+
