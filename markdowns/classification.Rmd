@@ -1,4 +1,166 @@
-CLASSIFICATION MODELLING
 ```{r}
+# ============================================================
+# 10.1  Create classification targets
+# ============================================================
+# Discretise Y1 into Low / Medium / High energy demand
+df$HL_class <- cut(df$HeatingLoad,
+                   breaks = quantile(df$HeatingLoad, probs = c(0, 1/3, 2/3, 1)),
+                   labels = c("Low", "Medium", "High"),
+                   include.lowest = TRUE)
 
+df$CL_class <- cut(df$CoolingLoad,
+                   breaks = quantile(df$CoolingLoad, probs = c(0, 1/3, 2/3, 1)),
+                   labels = c("Low", "Medium", "High"),
+                   include.lowest = TRUE)
+
+table(df$HL_class)
+table(df$CL_class)
+
+# Re-split
+train_clf <- df[train_idx, ]
+test_clf  <- df[-train_idx, ]
+```
+
+```{r}
+# ============================================================
+# 10.2  Logistic Regression (Multinomial — Parametric)
+# ============================================================
+multinom_hl <- nnet::multinom(HL_class ~ RelCompactness + SurfaceArea + WallArea +
+                                RoofArea + OverallHeight + Orientation + GlazingArea +
+                                GlazingAreaDist, data = train_clf, trace = FALSE)
+summary(multinom_hl)
+
+pred_multinom <- predict(multinom_hl, newdata = test_clf)
+confusionMatrix(pred_multinom, test_clf$HL_class)
+```
+
+
+```{r}
+# ============================================================
+# 10.3  Decision Tree Classification (Non-parametric)
+# ============================================================
+tree_clf <- rpart(HL_class ~ RelCompactness + SurfaceArea + WallArea +
+                    RoofArea + OverallHeight + Orientation + GlazingArea +
+                    GlazingAreaDist, data = train_clf, method = "class")
+rpart.plot(tree_clf, main = "Classification Tree — Heating Load Class")
+
+pred_tree_clf <- predict(tree_clf, newdata = test_clf, type = "class")
+confusionMatrix(pred_tree_clf, test_clf$HL_class)
+```
+
+
+```{r}
+# ============================================================
+# 10.4  Random Forest Classification (Ensemble, Non-parametric)
+# ============================================================
+set.seed(42)
+rf_clf <- randomForest(HL_class ~ RelCompactness + SurfaceArea + WallArea +
+                         RoofArea + OverallHeight + Orientation + GlazingArea +
+                         GlazingAreaDist, data = train_clf,
+                       ntree = 500, importance = TRUE)
+print(rf_clf)
+varImpPlot(rf_clf, main = "RF Classification — Variable Importance")
+
+pred_rf_clf <- predict(rf_clf, newdata = test_clf)
+confusionMatrix(pred_rf_clf, test_clf$HL_class)
+```
+
+
+```{r}
+# ============================================================
+# 10.5  SVM Classification (Kernel, Non-parametric)
+# ============================================================
+svm_clf <- svm(HL_class ~ RelCompactness + SurfaceArea + WallArea +
+                 RoofArea + OverallHeight + Orientation + GlazingArea +
+                 GlazingAreaDist, data = train_clf,
+               kernel = "radial", cost = 10, gamma = 0.1)
+pred_svm_clf <- predict(svm_clf, newdata = test_clf)
+confusionMatrix(pred_svm_clf, test_clf$HL_class)
+```
+
+
+```{r}
+# ============================================================
+# 10.6  k-NN Classification (Non-parametric)
+# ============================================================
+knn_clf <- train(HL_class ~ RelCompactness + SurfaceArea + WallArea +
+                   RoofArea + OverallHeight + Orientation + GlazingArea +
+                   GlazingAreaDist, data = train_clf,
+                 method = "knn", trControl = knn_ctrl,
+                 tuneGrid = data.frame(k = c(3, 5, 7, 9, 11)))
+pred_knn_clf <- predict(knn_clf, newdata = test_clf)
+confusionMatrix(pred_knn_clf, test_clf$HL_class)
+```
+
+
+```{r}
+# ============================================================
+# 10.7  Naive Bayes (Parametric / Generative)
+# ============================================================
+nb_clf <- naiveBayes(HL_class ~ RelCompactness + SurfaceArea + WallArea +
+                       RoofArea + OverallHeight + Orientation + GlazingArea +
+                       GlazingAreaDist, data = train_clf)
+pred_nb_clf <- predict(nb_clf, newdata = test_clf)
+confusionMatrix(pred_nb_clf, test_clf$HL_class)
+```
+
+
+```{r}
+# ============================================================
+# 10.8  XGBoost Classification (Ensemble, Non-parametric)
+# ============================================================
+# Encode target as 0, 1, 2
+train_clf$HL_num <- as.integer(train_clf$HL_class) - 1
+test_clf$HL_num  <- as.integer(test_clf$HL_class) - 1
+
+dtrain_clf <- xgb.DMatrix(data = as.matrix(train_clf[, features]), label = train_clf$HL_num)
+dtest_clf  <- xgb.DMatrix(data = as.matrix(test_clf[, features]),  label = test_clf$HL_num)
+
+params_clf <- list(
+  objective       = "multi:softmax",
+  num_class       = 3,
+  eta             = 0.1,
+  max_depth       = 6,
+  eval_metric     = "mlogloss"
+)
+
+xgb_clf <- xgb.train(params = params_clf, data = dtrain_clf, nrounds = 150,
+                      watchlist = list(train = dtrain_clf, test = dtest_clf),
+                      verbose = 0, early_stopping_rounds = 20)
+
+pred_xgb_clf <- predict(xgb_clf, newdata = dtest_clf)
+pred_xgb_clf_f <- factor(pred_xgb_clf, levels = 0:2, labels = c("Low", "Medium", "High"))
+confusionMatrix(pred_xgb_clf_f, test_clf$HL_class)
+```
+
+
+```{r}
+# ============================================================
+# 10.9  Classification Model Comparison
+# ============================================================
+clf_models <- c("Multinomial Logistic", "Decision Tree", "Random Forest",
+                "SVM (RBF)", "k-NN", "Naive Bayes", "XGBoost")
+clf_preds <- list(pred_multinom, pred_tree_clf, pred_rf_clf, pred_svm_clf,
+                  pred_knn_clf, pred_nb_clf, pred_xgb_clf_f)
+
+clf_results <- data.frame()
+for (i in seq_along(clf_models)) {
+  cm <- confusionMatrix(clf_preds[[i]], test_clf$HL_class)
+  clf_results <- rbind(clf_results, data.frame(
+    Model    = clf_models[i],
+    Accuracy = cm$overall["Accuracy"],
+    Kappa    = cm$overall["Kappa"]
+  ))
+}
+clf_results <- clf_results %>% arrange(desc(Accuracy))
+cat("\n========== CLASSIFICATION MODEL COMPARISON (Y1) ==========\n")
+print(clf_results, row.names = FALSE)
+
+ggplot(clf_results, aes(x = reorder(Model, Accuracy), y = Accuracy)) +
+  geom_col(fill = "purple4", alpha = 0.7) +
+  geom_text(aes(label = round(Accuracy, 4)), hjust = -0.1, size = 3) +
+  coord_flip() +
+  labs(title = "Classification Accuracy — Heating Load Classes",
+       x = "Model", y = "Accuracy") +
+  theme_minimal()
 ```

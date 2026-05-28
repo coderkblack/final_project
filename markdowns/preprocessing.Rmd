@@ -1,5 +1,12 @@
-FEATURE ENGINEERING & TRANSFORMATION CHECKS
+# FEATURE ENGINEERING & TRANSFORMATION CHECKS
+```{r packages}
+pkgs <- c("tidyverse", "caret", "randomForest", "xgboost", "nnet",
+          "mgcv", "splines", "corrplot", "ggplot2", "ggplot", "dplyr",
+          "pdp", "vip", "readxl", "writexl")
+```
+
 ```{r}
+df <- read_excel("ENB2012_data 2.xlsx")
 # ============================================================
 # 7.1  Check if log transformations help Y1 and Y2
 # ============================================================
@@ -10,8 +17,6 @@ hist(df$CoolingLoad, breaks = 30, main = "Y2: Cooling Load", col = "lightblue")
 hist(log(df$CoolingLoad), breaks = 30, main = "log(Y2)", col = "lightgreen")
 par(mfrow = c(1, 1))
 ```
-
-
 
 
 ```{r}
@@ -27,8 +32,6 @@ bc_y2 <- MASS::boxcox(lm(CoolingLoad ~ ., data = df %>% select(RelCompactness:Ro
 lambda_y2 <- bc_y2$x[which.max(bc_y2$y)]
 cat("Optimal Box-Cox lambda for Y2:", lambda_y2, "\n")
 ```
-
-
 
 
 ```{r}
@@ -58,3 +61,19 @@ df <- df %>%
     SurfToVol            = SurfaceArea / (WallArea + RoofArea)
   )
 ```
+
+
+```{r}
+# ============================================================
+# 7.5  Export final dataframe to Excel
+# ============================================================
+
+# Install package if not already installed
+# install.packages("writexl")
+library(writexl)
+
+write_xlsx(df, "final_feature_engineered_dataset.xlsx")
+
+cat("Excel file exported successfully.\n")
+```
+

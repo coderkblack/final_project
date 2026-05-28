@@ -1,5 +1,26 @@
-Semi-parametric & Nonlinear Models (Y1 — Heating Load)
+# Semi-parametric and Nonlinear Models
+
+This file covers the more flexible end of the modelling spectrum. Unlike the purely parametric models in the regression file, the methods here either relax or abandon the assumption of a fixed functional form. Some, like the Generalised Additive Model, remain partially interpretable by estimating smooth functions of individual predictors. Others, like Random Forest and XGBoost, treat the data as a pattern recognition problem and make no assumptions about the shape of the relationships at all. The tradeoff is that flexibility typically comes at the cost of some interpretability, though variable importance measures go some way towards compensating for this. All models are evaluated on the same held-out test set used in the regression file so that the results are directly comparable.
+
+---
+
+## Y1 — Heating Load
+
+The nonlinear models are applied first to heating load. Given the physical nature of building thermodynamics, there is good reason to expect some of the relationships between the building features and energy demand to be genuinely nonlinear, which makes this family of models a natural fit for the problem.
+
+### Model 7 — GAM
+
+The Generalised Additive Model sits at the boundary between parametric and nonlinear approaches. It replaces the fixed linear terms with smooth spline functions estimated from the data, allowing each predictor to follow its own flexible curve. Orientation and glazing area distribution are kept as linear terms given their discrete or near-discrete nature, while the remaining continuous predictors are given smooth terms. The REML fitting method is used to avoid overfitting the smooths, and the gam.check output is inspected to verify that the smooth complexity is appropriate.
+
+```{r packages}
+pkgs <- c("tidyverse", "caret", "randomForest", "xgboost", "nnet",
+          "mgcv", "splines", "corrplot", "ggplot2", "ggplot", "dplyr",
+          "pdp", "vip", "readxl")
+```
+
 ```{r}
+df <- read_excel("Data after preprocessing is done")
+
 # ============================================================
 # 8.7  MODEL 7 — GAM: Generalised Additive Model (Semi-parametric)
 # ============================================================
@@ -15,8 +36,9 @@ pred_gam_y1 <- predict(gam_y1, newdata = test_data)
 results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_gam_y1, "GAM"))
 ```
 
+### Model 8 — MARS
 
-
+Multivariate Adaptive Regression Splines builds a piecewise linear model by automatically detecting breakpoints, called knots, in the predictor space and fitting separate linear segments on either side. It also considers interaction terms up to degree two, meaning it can capture cases where the effect of one predictor depends on the value of another. The result is a model that is more flexible than ordinary linear regression but still produces an explicit equation that can be inspected and interpreted. Variable importance scores from the evimp function show which predictors contribute most to the fit.
 
 ```{r}
 # ============================================================
@@ -32,8 +54,9 @@ pred_mars_y1 <- predict(mars_y1, newdata = test_data)
 results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_mars_y1, "MARS"))
 ```
 
+### Model 9 — Regression Tree
 
-
+A single regression tree partitions the feature space into rectangular regions by repeatedly splitting on the predictor that most reduces prediction error. The result is a model that is visually intuitive and makes no assumptions about functional form, but which can be unstable since small changes in the training data can produce quite different tree structures. A complexity parameter of 0.01 is set as the minimum split improvement threshold, and the tree is then pruned back to the depth that minimises cross-validated error, trading some training accuracy for better generalisation.
 
 ```{r}
 # ============================================================
@@ -52,8 +75,9 @@ pred_tree_y1 <- predict(tree_y1_pruned, newdata = test_data)
 results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_tree_y1, "Regression Tree"))
 ```
 
+### Model 10 — Random Forest
 
-
+Random Forest addresses the instability of single trees by growing a large number of them, each trained on a bootstrap sample of the training data and using a random subset of predictors at each split. Predictions are averaged across all 500 trees, which dramatically reduces variance compared to a single tree. The mtry parameter is set to 3, meaning three randomly selected features are considered at each split. Variable importance plots are produced using both mean decrease in accuracy and mean decrease in node impurity to give a rounded picture of which predictors matter most.
 
 ```{r}
 # ============================================================
@@ -70,8 +94,9 @@ pred_rf_y1 <- predict(rf_y1, newdata = test_data)
 results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_rf_y1, "Random Forest"))
 ```
 
+### Model 11 — XGBoost
 
-
+XGBoost is a gradient boosting algorithm that builds trees sequentially, with each new tree correcting the errors made by the ensemble so far. It tends to be among the strongest performers on tabular data because it combines boosting with regularisation terms and subsampling of both rows and columns, which helps prevent overfitting. Early stopping is used here to halt training once the test set error stops improving, avoiding unnecessary rounds. Feature importance scores are extracted after training to identify the most influential predictors.
 
 ```{r}
 # ============================================================
@@ -81,10 +106,10 @@ dtrain_y1 <- xgb.DMatrix(data = x_train, label = y_train)
 dtest_y1  <- xgb.DMatrix(data = x_test, label = test_data$HeatingLoad)
 
 params_y1 <- list(
-  objective  = "reg:squarederror",
-  eta        = 0.1,
-  max_depth  = 6,
-  subsample  = 0.8,
+  objective        = "reg:squarederror",
+  eta              = 0.1,
+  max_depth        = 6,
+  subsample        = 0.8,
   colsample_bytree = 0.8
 )
 
@@ -99,8 +124,9 @@ pred_xgb_y1 <- predict(xgb_y1, newdata = dtest_y1)
 results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_xgb_y1, "XGBoost"))
 ```
 
+### Model 12 — SVM Regression
 
-
+Support Vector Machine regression finds a function that fits as many training points as possible within a tolerance band of width epsilon around the predicted values, while penalising points that fall outside that band. The radial basis function kernel is used here, which maps the data into a higher-dimensional space and allows the model to capture complex nonlinear patterns. The cost parameter of 10 controls how severely outlying points are penalised, and the epsilon value of 0.1 defines the width of the insensitive tube.
 
 ```{r}
 # ============================================================
@@ -114,8 +140,9 @@ pred_svm_y1 <- predict(svm_y1, newdata = test_data)
 results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_svm_y1, "SVM (RBF)"))
 ```
 
+### Model 13 — Neural Network
 
-
+A single hidden layer neural network is fitted with ten neurons in the hidden layer and a linear output activation, which is appropriate for regression tasks. The features are standardised before training since neural networks are sensitive to the scale of their inputs. Weight decay regularisation is applied with a value of 0.01 to discourage the model from overfitting by penalising large weights. The network is trained for up to 500 iterations.
 
 ```{r}
 # ============================================================
@@ -134,8 +161,9 @@ pred_nn_y1 <- predict(nn_y1, newdata = test_scaled)
 results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_nn_y1, "Neural Network"))
 ```
 
+### Model 14 — k-Nearest Neighbors
 
-
+k-Nearest Neighbors regression predicts the heating load for a new observation by finding the k most similar buildings in the training set and averaging their observed heating loads. It makes no assumptions at all about the functional form of the relationship and adapts entirely to local patterns in the data. The value of k is selected through 10-fold cross-validation across a grid of candidate values ranging from 3 to 15. Smaller values of k produce more flexible but noisier predictions, while larger values produce smoother but potentially biased ones.
 
 ```{r}
 # ============================================================
@@ -154,32 +182,44 @@ pred_knn_y1 <- predict(knn_y1, newdata = test_data)
 results_y1 <- rbind(results_y1, eval_reg(test_data$HeatingLoad, pred_knn_y1, "k-NN Regression"))
 ```
 
+### Y1 — Model Comparison
+
+All eight nonlinear and semi-parametric models are now ranked by test set RMSE. The spread of results across these models tends to be wider than for the parametric models, reflecting the greater variability in how well different flexible approaches suit a given dataset. The R squared comparison chart provides a complementary view of explanatory power.
 
 ```{r}
 # ============================================================
-# 8.16  COMPARISON TABLE — ALL MODELS FOR Y1
+# Y1 COMPARISON — Semi-parametric & Nonlinear Models Only
 # ============================================================
 results_y1 <- results_y1 %>% arrange(RMSE)
-cat("\n========== Y1: HEATING LOAD — MODEL COMPARISON ==========\n")
+cat("\n========== Y1: HEATING LOAD — SEMI-PARAMETRIC & NONLINEAR MODEL COMPARISON ==========\n")
 print(results_y1, row.names = FALSE)
 
 ggplot(results_y1, aes(x = reorder(Model, RMSE), y = RMSE)) +
   geom_col(fill = "steelblue", alpha = 0.8) +
   geom_text(aes(label = round(RMSE, 3)), hjust = -0.1, size = 3) +
   coord_flip() +
-  labs(title = "Model Comparison — Heating Load (Y1)", x = "Model", y = "RMSE (Test Set)") +
+  labs(title = "Semi-parametric & Nonlinear Model Comparison — Heating Load (Y1)",
+       x = "Model", y = "RMSE (Test Set)") +
   theme_minimal()
 
 ggplot(results_y1, aes(x = reorder(Model, -R2), y = R2)) +
   geom_col(fill = "darkgreen", alpha = 0.7) +
   geom_text(aes(label = round(R2, 4)), hjust = -0.1, size = 3) +
   coord_flip() +
-  labs(title = "R² Comparison — Heating Load (Y1)", x = "Model", y = "R²") +
+  labs(title = "R² Comparison — Heating Load (Y1)",
+       x = "Model", y = "R²") +
   theme_minimal()
 ```
 
-(Y2 — Cooling Load)
+---
 
+## Y2 — Cooling Load
+
+The same eight models are now applied to cooling load. Cooling load is generally considered a slightly harder prediction target because it depends more strongly on external conditions like solar gain and ambient temperature, factors that interact with building geometry in complex ways. Flexible models are therefore well positioned to capture these dynamics.
+
+### Model 7 — GAM
+
+The GAM for cooling load uses the same smooth term structure as the heating load model, with REML fitting to control smoothness. The partial effect plots produced by the model are particularly informative here because they show visually how each building characteristic influences cooling demand across its observed range.
 
 ```{r}
 # --- 9.7  GAM ---
@@ -194,8 +234,9 @@ pred_gam_y2 <- predict(gam_y2, newdata = test_data)
 results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_gam_y2, "GAM"))
 ```
 
+### Model 8 — MARS
 
-
+MARS is applied to cooling load with the same degree-two setting to allow pairwise interactions. Comparing the knot locations and retained terms to those from the heating load model gives a sense of whether the same nonlinearities are present in both energy demands or whether the relationships differ in character.
 
 ```{r}
 # --- 9.8  MARS ---
@@ -206,8 +247,9 @@ pred_mars_y2 <- predict(mars_y2, newdata = test_data)
 results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_mars_y2, "MARS"))
 ```
 
+### Model 9 — Regression Tree
 
-
+The regression tree for cooling load is grown and pruned using the same procedure as for heating load. Because the tree partitions the feature space based purely on reducing prediction error, the structure of the cooling load tree may differ substantially from the heating load tree if the dominant predictors or their interaction patterns are different.
 
 ```{r}
 # --- 9.9  Regression Tree ---
@@ -220,8 +262,9 @@ pred_tree_y2 <- predict(tree_y2_pruned, newdata = test_data)
 results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_tree_y2, "Regression Tree"))
 ```
 
+### Model 10 — Random Forest
 
-
+The Random Forest for cooling load uses the same hyperparameter settings as the heating load forest. Variable importance plots are produced and can be compared to those from the heating load forest to see whether the ranking of predictors is consistent across both targets or whether certain features become more or less relevant depending on which energy demand is being modelled.
 
 ```{r}
 # --- 9.10  Random Forest ---
@@ -234,8 +277,9 @@ pred_rf_y2 <- predict(rf_y2, newdata = test_data)
 results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_rf_y2, "Random Forest"))
 ```
 
+### Model 11 — XGBoost
 
-
+XGBoost is applied to cooling load by reusing the parameter list defined for heating load, keeping the comparison clean. Early stopping monitors the test set error and halts training when no improvement is seen for 20 consecutive rounds.
 
 ```{r}
 # --- 9.11  XGBoost ---
@@ -249,8 +293,9 @@ pred_xgb_y2 <- predict(xgb_y2, newdata = dtest_y2)
 results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_xgb_y2, "XGBoost"))
 ```
 
+### Model 12 — SVM Regression
 
-
+The radial basis function SVM is fitted to cooling load with the same cost and epsilon values used for heating load. If the error surface for cooling load is smoother or more regular, the SVM may perform relatively better here than it did for heating load.
 
 ```{r}
 # --- 9.12  SVM ---
@@ -261,8 +306,9 @@ pred_svm_y2 <- predict(svm_y2, newdata = test_data)
 results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_svm_y2, "SVM (RBF)"))
 ```
 
+### Model 13 — Neural Network
 
-
+The neural network for cooling load is trained on the same scaled features produced during the heating load analysis, with a new column for the cooling load outcome appended to the scaled training data. The architecture and regularisation settings are kept identical to allow a fair comparison of how well the network adapts to each target.
 
 ```{r}
 # --- 9.13  Neural Network ---
@@ -275,8 +321,9 @@ pred_nn_y2 <- predict(nn_y2, newdata = test_scaled)
 results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_nn_y2, "Neural Network"))
 ```
 
+### Model 14 — k-Nearest Neighbors
 
-
+k-NN is applied to cooling load using the same cross-validated k selection grid. Because the feature space is identical to the one used for heating load, the optimal k may differ if the local structure of the cooling load surface is smoother or more irregular than that of heating load.
 
 ```{r}
 # --- 9.14  k-NN ---
@@ -288,17 +335,31 @@ pred_knn_y2 <- predict(knn_y2, newdata = test_data)
 results_y2 <- rbind(results_y2, eval_reg(test_data$CoolingLoad, pred_knn_y2, "k-NN Regression"))
 ```
 
+### Y2 — Model Comparison
+
+The final comparison ranks all eight nonlinear and semi-parametric models for cooling load by test set RMSE. Taken together with the equivalent table for heating load, these results give a clear picture of which flexible approaches generalise best across both energy demands and which are more target-specific in their performance.
 
 ```{r}
-# --- 9.16  Comparison ---
+# ============================================================
+# Y2 COMPARISON — Semi-parametric & Nonlinear Models Only
+# ============================================================
 results_y2 <- results_y2 %>% arrange(RMSE)
-cat("\n========== Y2: COOLING LOAD — MODEL COMPARISON ==========\n")
+cat("\n========== Y2: COOLING LOAD — SEMI-PARAMETRIC & NONLINEAR MODEL COMPARISON ==========\n")
 print(results_y2, row.names = FALSE)
 
 ggplot(results_y2, aes(x = reorder(Model, RMSE), y = RMSE)) +
   geom_col(fill = "darkorange", alpha = 0.8) +
   geom_text(aes(label = round(RMSE, 3)), hjust = -0.1, size = 3) +
   coord_flip() +
-  labs(title = "Model Comparison — Cooling Load (Y2)", x = "Model", y = "RMSE") +
+  labs(title = "Semi-parametric & Nonlinear Model Comparison — Cooling Load (Y2)",
+       x = "Model", y = "RMSE (Test Set)") +
+  theme_minimal()
+
+ggplot(results_y2, aes(x = reorder(Model, -R2), y = R2)) +
+  geom_col(fill = "darkgreen", alpha = 0.7) +
+  geom_text(aes(label = round(R2, 4)), hjust = -0.1, size = 3) +
+  coord_flip() +
+  labs(title = "R² Comparison — Cooling Load (Y2)",
+       x = "Model", y = "R²") +
   theme_minimal()
 ```
