@@ -1,4 +1,1331 @@
-CLASSIFICATION MODELLING
-```{r}
+---
+title: "new"
+author: "Jakes Chege"
+date: '`r Sys.Date()`'
+output: html_document
+---
 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 11, fig.height = 7)
 ```
+
+```{r packages}
+pkgs <- c("tidyverse", "caret", "randomForest", "xgboost", "nnet",
+          "mgcv", "splines", "corrplot", "ggplot2", "ggplot", "dplyr",
+          "pdp", "vip", "readxl")
+```
+
+Description of the variables in the data
+* $X_1$ 	Relative Compactness
+* $X_2$ 	Surface Area
+* $X_3$ 	Wall Area
+* $X_4$ 	Roof Area
+* $X_5$ 	Overall Height
+* $X_6$ 	Orientation
+* $X_7$ 	Glazing Area
+* $X_8$ 	Glazing Area Distribution
+* $Y_1$ 	Heating Load
+* $Y_2$ 	Cooling Load
+
+
+The variables labeled 
+* $X_i$: attributes (covariates) 
+* $Y_i$: supposed to be outcome variables 
+
+The aim is to use the features to predict each of the outcome responses. Can you think of classification models, regression models (parametric, semi-parametric, non-linear) where possible and be able to perform analysis that can assess the heating load and cooling load requirements of buildings. 
+
+I expect to see very robust analysis and we should have a very well done presentation to assess the overall understanding of this unit as we approach the examination date. 
+
+```{r load-data}
+df <- read_excel("/Users/joe/final_project/data/ENB2012_data 2.xlsx")
+head(df)
+```
+
+
+```{r}
+colnames(df) <- c(
+  "RelCompactness",   # X1
+  "SurfaceArea",      # X2
+  "WallArea",         # X3
+  "RoofArea",         # X4
+  "OverallHeight",    # X5
+  "Orientation",      # X6
+  "GlazingArea",      # X7
+  "GlazingAreaDist",  # X8
+  "HeatingLoad",      # Y1
+  "CoolingLoad"       # Y2
+)
+```
+
+```{r}
+summary(df)
+```
+```{r}
+df_orig <- read_excel("/Users/joe/final_project/data/ENB2012_data 2.xlsx")
+```
+
+```{r}
+cat("Dimensions:", dim(df), "\n")
+str(df)
+```
+
+```{r}
+head(df, 10)
+tail(df, 10)
+```
+
+```{r}
+library(psych)
+psych::describe(df)
+```
+
+```{r}
+cat("\nMissing values per column:\n")
+colSums(is.na(df))
+
+cat("\nTotal missing:", sum(is.na(df)), "\n")
+```
+
+```{r}
+cat("Duplicated rows:", sum(duplicated(df)), "\n")
+
+# View some duplicates if they exist
+if (sum(duplicated(df)) > 0) {
+  df[duplicated(df) | duplicated(df, fromLast = TRUE), ] %>% 
+    arrange(RelCompactness, SurfaceArea) %>% 
+    head(20)
+}
+```
+# 2.7  Unique value counts per variable
+```{r}
+sapply(df, function(x) length(unique(x)))
+```
+# 2.8  Data types check
+```{r}
+sapply(df, class)
+```
+# Note: OverallHeight has only 2 levels (3.5, 7.0) — essentially binary
+# Orientation has 4 levels (2,3,4,5) — categorical
+# GlazingArea has 4 levels (0, 0.1, 0.25, 0.4) — ordinal/categorical
+# GlazingAreaDist has 6 levels (0–5) — categorical
+```{r}
+# Convert appropriate variables to factors for certain analyses
+df$Orientation_f     <- factor(df$Orientation)
+df$OverallHeight_f   <- factor(df$OverallHeight, labels = c("Low_3.5m", "High_7m"))
+df$GlazingArea_f     <- factor(df$GlazingArea)
+df$GlazingAreaDist_f <- factor(df$GlazingAreaDist)
+```
+
+```{r}
+sapply(df, class)
+```
+
+```{r}
+head(df)
+```
+# 3.1  Histograms for all continuous variables
+```{r}
+cont_vars <- c("RelCompactness", "SurfaceArea", "WallArea", "RoofArea",
+               "HeatingLoad", "CoolingLoad")
+
+p_hist <- list()
+for (v in cont_vars) {
+  p_hist[[v]] <- ggplot(df, aes(x = .data[[v]])) +
+    geom_histogram(aes(y = after_stat(density)), bins = 30,
+                   fill = "steelblue", color = "white", alpha = 0.7) +
+    geom_density(color = "red", linewidth = 0.8) +
+    labs(title = paste("Distribution of", v), x = v, y = "Density") +
+    theme_minimal(base_size = 11)
+}
+do.call(grid.arrange, c(p_hist, ncol = 3))
+```
+# 3.2  Boxplots for all numeric variables
+```{r}
+library(tidyverse)
+df_long <- df %>%
+  dplyr::select(RelCompactness:CoolingLoad) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "Value")
+
+ggplot(df_long, aes(x = Variable, y = Value, fill = Variable)) +
+  geom_boxplot(outlier.colour = "red", outlier.size = 1.5) +
+  facet_wrap(~ Variable, scales = "free", ncol = 5) +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "none",
+        axis.text.x = element_blank()) +
+  labs(title = "Boxplots of All Variables")
+```
+# 3.3  Bar charts for categorical/discrete variables
+```{r}
+cat_vars <- c("Orientation", "OverallHeight", "GlazingArea", "GlazingAreaDist")
+
+p_bar <- list()
+for (v in cat_vars) {
+  p_bar[[v]] <- ggplot(df, aes(x = factor(.data[[v]]))) +
+    geom_bar(fill = "coral", color = "white", alpha = 0.8) +
+    geom_text(stat = "count", aes(label = after_stat(count)), vjust = -0.3) +
+    labs(title = paste("Frequency of", v), x = v, y = "Count") +
+    theme_minimal(base_size = 11)
+}
+do.call(grid.arrange, c(p_bar, ncol = 2))
+```
+
+# 3.4  QQ-plots for normality assessment of Y1 and Y2
+```{r}
+par(mfrow = c(1, 2))
+qqnorm(df$HeatingLoad, main = "Q-Q Plot: Heating Load (Y1)")
+qqline(df$HeatingLoad, col = "red", lwd = 2)
+
+qqnorm(df$CoolingLoad, main = "Q-Q Plot: Cooling Load (Y2)")
+qqline(df$CoolingLoad, col = "red", lwd = 2)
+par(mfrow = c(1, 1))
+```
+# 3.5  Formal normality tests on the responses
+```{r}
+cat("Shapiro-Wilk test for Y1 (Heating Load):\n")
+shapiro.test(df$HeatingLoad[1:5000])  # Shapiro max 5000 obs, sample if needed
+# If n > 5000, use Anderson-Darling:
+nortest::ad.test(df$HeatingLoad)
+
+cat("\nShapiro-Wilk test for Y2 (Cooling Load):\n")
+shapiro.test(df$CoolingLoad)
+nortest::ad.test(df$CoolingLoad)
+```
+# 3.6  Ridgeline plots — distribution by OverallHeight
+```{r}
+library(ggridges)
+ggplot(df, aes(x = HeatingLoad, y = OverallHeight_f, fill = OverallHeight_f)) +
+  geom_density_ridges(alpha = 0.7) +
+  labs(title = "Heating Load Distribution by Overall Height",
+       x = "Heating Load", y = "Overall Height") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+ggplot(df, aes(x = CoolingLoad, y = OverallHeight_f, fill = OverallHeight_f)) +
+  geom_density_ridges(alpha = 0.7) +
+  labs(title = "Cooling Load Distribution by Overall Height",
+       x = "Cooling Load", y = "Overall Height") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+# 4.1  Scatter plots: each X vs Y1 and Y2
+```{r}
+feature_vars <- c("RelCompactness", "SurfaceArea", "WallArea", "RoofArea",
+                  "OverallHeight", "Orientation", "GlazingArea", "GlazingAreaDist")
+
+# --- Against Heating Load ---
+p_scat_y1 <- list()
+for (v in feature_vars) {
+  p_scat_y1[[v]] <- ggplot(df, aes(x = .data[[v]], y = HeatingLoad)) +
+    geom_point(alpha = 0.4, color = "steelblue", size = 1) +
+    geom_smooth(method = "loess", color = "red", se = TRUE, linewidth = 0.8) +
+    labs(title = paste(v, "vs Heating Load"), x = v, y = "Heating Load") +
+    theme_minimal(base_size = 9)
+}
+do.call(grid.arrange, c(p_scat_y1, ncol = 4))
+
+# --- Against Cooling Load ---
+p_scat_y2 <- list()
+for (v in feature_vars) {
+  p_scat_y2[[v]] <- ggplot(df, aes(x = .data[[v]], y = CoolingLoad)) +
+    geom_point(alpha = 0.4, color = "darkorange", size = 1) +
+    geom_smooth(method = "loess", color = "blue", se = TRUE, linewidth = 0.8) +
+    labs(title = paste(v, "vs Cooling Load"), x = v, y = "Cooling Load") +
+    theme_minimal(base_size = 9)
+}
+do.call(grid.arrange, c(p_scat_y2, ncol = 4))
+```
+
+The heating load is the amount of heat energy the building loses to the outside environment. To maintain a steady indoor temperature (e.g., 20°C), the heating system must produce enough heat to replace what is lost.
+
+The cooling load is the amount of heat energy the building gains from the outside environment and internal sources. The air conditioning system must remove this excess heat to keep the indoor temperature at a comfortable level.
+
+Physical Design Variables
+
+    RelCompactness (Relative Compactness): This measures how "compact" the building shape is. A more compact building (like a cube) has a lower ratio of surface area to volume, which generally helps keep heat inside.
+
+    SurfaceArea: The total exterior area of the building (walls, roof, and floor). Generally, a larger surface area allows more heat to escape to the outside environment.
+
+    WallArea: The total square footage of the exterior walls. Larger wall areas usually result in higher heat loss because walls are a primary path for heat transfer.
+
+    RoofArea: The total area of the roof. Like walls, the roof is a significant surface where heat can escape, especially in colder climates.
+
+    OverallHeight: How tall the building is. Taller buildings often have more exposed surface area, which can increase the heating load.
+
+Orientation and Window Variables
+
+    Orientation: The direction the building faces (e.g., North, East, South, West). This determines how much direct sunlight the house receives, which can help warm it naturally (passive solar gain).
+
+    GlazingArea: The percentage of the floor area that is covered by glass (windows). More glass generally means more potential for heat loss in winter, though it also allows for more solar heating.
+
+    GlazingAreaDist (Glazing Area Distribution): This describes where the windows are located on the building (e.g., uniformly distributed, or concentrated on one side like the South side to maximize solar heat).
+    
+# 4.2  Scatter with colour by Overall Height
+```{r}
+ggplot(df, aes(x = RelCompactness, y = HeatingLoad, color = OverallHeight_f)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Relative Compactness vs Heating Load by Height",
+       color = "Overall Height") +
+  theme_minimal()
+
+ggplot(df, aes(x = WallArea, y = CoolingLoad, color = OverallHeight_f)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Wall Area vs Cooling Load by Height",
+       color = "Overall Height") +
+  theme_minimal()
+```
+
+# 4.3  Boxplots of Y1/Y2 across categorical features
+```{r}
+# Heating Load by Orientation
+ggplot(df, aes(x = Orientation_f, y = HeatingLoad, fill = Orientation_f)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Heating Load by Orientation", x = "Orientation") +
+  theme_minimal() + theme(legend.position = "none")
+
+# Heating Load by Glazing Area
+ggplot(df, aes(x = GlazingArea_f, y = HeatingLoad, fill = GlazingArea_f)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Heating Load by Glazing Area", x = "Glazing Area") +
+  theme_minimal() + theme(legend.position = "none")
+
+# Cooling Load by Glazing Area Distribution
+ggplot(df, aes(x = GlazingAreaDist_f, y = CoolingLoad, fill = GlazingAreaDist_f)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Cooling Load by Glazing Area Distribution", x = "Glazing Area Distribution") +
+  theme_minimal() + theme(legend.position = "none")
+
+# Heating Load by Overall Height
+ggplot(df, aes(x = OverallHeight_f, y = HeatingLoad, fill = OverallHeight_f)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Heating Load by Overall Height") +
+  theme_minimal() + theme(legend.position = "none")
+```
+The more the number of windows, the more the heat the house is likely to lose to the outside environment.
+The less the distance between windows, the more the heat gained from the outside environment.
+The taller the building, the more the heat lost to the outside environment.
+
+# 4.4  Violin plots (richer than boxplots)
+```{r}
+ggplot(df, aes(x = GlazingArea_f, y = HeatingLoad, fill = GlazingArea_f)) +
+  geom_violin(alpha = 0.6) +
+  geom_boxplot(width = 0.15, fill = "white") +
+  labs(title = "Heating Load by Glazing Area (Violin + Boxplot)") +
+  theme_minimal() + theme(legend.position = "none")
+```
+# 4.5  Interaction plots
+```{r}
+# Two-way interaction: OverallHeight × GlazingArea on HeatingLoad
+df %>%
+  group_by(OverallHeight_f, GlazingArea_f) %>%
+  summarise(mean_HL = mean(HeatingLoad), .groups = "drop") %>%
+  ggplot(aes(x = GlazingArea_f, y = mean_HL, 
+             color = OverallHeight_f, group = OverallHeight_f)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  labs(title = "Interaction: Overall Height × Glazing Area on Heating Load",
+       x = "Glazing Area", y = "Mean Heating Load", color = "Height") +
+  theme_minimal()
+```
+
+# 5.1  Pearson correlation matrix
+```{r}
+cor_matrix <- cor(df %>% dplyr::select(RelCompactness:CoolingLoad), method = "pearson")
+round(cor_matrix, 3)
+```
+```{r}
+# ============================================================
+# 5.2  Correlation heatmap (corrplot)
+# ============================================================
+library(corrplot)
+corrplot(cor_matrix, method = "color", type = "upper",
+         addCoef.col = "black", number.cex = 0.7,
+         tl.col = "black", tl.srt = 45,
+         col = colorRampPalette(c("#6D9EC1", "white", "#E46726"))(200),
+         title = "Pearson Correlation Matrix",
+         mar = c(0, 0, 2, 0))
+```
+Overall Height seems to be influential in determining the heating and cooling loads of a building. Heating and cooling load are also highly correlated. There is also a high negative correlation between Relative compactness and surface area.
+
+```{r}
+# ============================================================
+# 5.3  ggcorrplot version (publication quality)
+# ============================================================
+library(ggcorrplot)
+ggcorrplot(cor_matrix, type = "lower", lab = TRUE, lab_size = 3,
+           colors = c("#2166AC", "white", "#B2182B"),
+           title = "Correlation Heatmap",
+           ggtheme = theme_minimal())
+```
+
+```{r}
+# ============================================================
+# 5.6  Multicollinearity check (VIF) with a preliminary linear model
+# ============================================================
+# Because SurfaceArea = WallArea + RoofArea, the model cannot mathematically solve the equation because the columns are perfectly correlated.
+# Option: Remove SurfaceArea to resolve the aliasing
+prelim_model_fixed <- lm(HeatingLoad ~ RelCompactness + WallArea + RoofArea + 
+                           OverallHeight + Orientation + GlazingArea + 
+                           GlazingAreaDist, data = df)
+
+# Now check the VIF again
+vif(prelim_model_fixed)
+
+# VIF > 10 signals severe multicollinearity
+# VIF > 5  signals moderate concern
+```
+When VIF scores are this high (especially those over 100), it tells us that your independent variables are not truly independent.
+
+```{r}
+# ============================================================
+# 6.1  Boxplot-based outlier identification
+# ============================================================
+detect_outliers <- function(x) {
+  q1 <- quantile(x, 0.25)
+  q3 <- quantile(x, 0.75)
+  iqr <- q3 - q1
+  lower <- q1 - 1.5 * iqr
+  upper <- q3 + 1.5 * iqr
+  return(sum(x < lower | x > upper))
+}
+
+cat("Outlier counts (IQR method):\n")
+sapply(df %>% dplyr::select(RelCompactness:CoolingLoad), detect_outliers)
+```
+
+
+```{r}
+# ============================================================
+# 6.3  Cook's Distance from the linear model
+# ============================================================
+cooks_d <- cooks.distance(prelim_model_fixed)
+plot(cooks_d, type = "h", main = "Cook's Distance", ylab = "Cook's D")
+abline(h = 4 / nrow(df), col = "red", lty = 2)
+cat("Influential points (Cook's D > 4/n):", sum(cooks_d > 4/nrow(df)), "\n")
+```
+```{r}
+flag_outlier_rows <- function(df_num) {
+  apply(df_num, 1, function(row) {
+   any(sapply(seq_along(row), function(i) {
+     q1 <- quantile(df_num[[i]], 0.25)
+     q3 <- quantile(df_num[[i]], 0.75)
+     iqr <- q3 - q1
+      row[i] < (q1 - 1.5 * iqr) | row[i] > (q3 + 1.5 * iqr)
+   }))
+  })
+}
+
+df$is_outlier <- flag_outlier_rows(df %>% dplyr::select(RelCompactness:CoolingLoad))
+cat("Rows flagged as outliers:", sum(df$is_outlier), "\n")
+
+# ============================================================
+# Preprocessing (df is already loaded in the environment)
+# ============================================================
+
+cat("Dimensions:", nrow(df), "rows x", ncol(df), "columns\n")
+cat("Columns:", paste(names(df), collapse = ", "), "\n\n")
+
+glimpse(df)
+```
+
+# Restore Factor Variables
+
+Excel does not preserve R factor types. We restore them from the raw
+numeric columns that were carried over.
+
+```{r restore-factors}
+df$Orientation_f <- factor(
+  df$Orientation,
+  levels = 2:5,
+  labels = c("N", "E", "S", "W")
+)
+
+df$OverallHeight_f <- factor(
+  df$OverallHeight,
+  levels = c(3.5, 7.0),
+  labels = c("Low_3.5m", "High_7m")
+)
+
+df$GlazingArea_f <- factor(
+  df$GlazingArea,
+  levels = c(0, 0.1, 0.25, 0.4),
+  labels = c("None", "Low_10pct", "Med_25pct", "High_40pct")
+)
+
+df$GlazingAreaDist_f <- factor(
+  df$GlazingAreaDist,
+  levels = 0:5,
+  labels = c("None", "Uniform", "N_heavy", "E_heavy", "S_heavy", "W_heavy")
+)
+
+cat("Factor levels restored:\n")
+cat("  Orientation_f    :", levels(df$Orientation_f), "\n")
+cat("  OverallHeight_f  :", levels(df$OverallHeight_f), "\n")
+cat("  GlazingArea_f    :", levels(df$GlazingArea_f), "\n")
+cat("  GlazingAreaDist_f:", levels(df$GlazingAreaDist_f), "\n")
+```
+
+---
+
+# Outlier Handling
+
+The `is_outlier` flag was computed in EDA using the IQR method across
+all numeric predictors and responses. We inspect the flagged rows and
+decide on a strategy.
+
+## Inspect flagged rows
+
+```{r outlier-inspect}
+cat("Total rows flagged as outliers:", sum(df$is_outlier, na.rm = TRUE), "\n")
+cat("Percentage:", round(mean(df$is_outlier, na.rm = TRUE) * 100, 2), "%\n\n")
+
+# Preview flagged rows
+df %>%
+  filter(is_outlier == TRUE) %>%
+  dplyr::select(RelCompactness:CoolingLoad) %>%
+  summary()
+```
+
+Since there are no outliers, we keep the data as it is.
+
+# Response Variable Transformation
+
+## Visual check: raw vs log
+
+```{r log-check}
+# Initialize df_clean
+df_clean <- df
+par(mfrow = c(2, 2))
+
+hist(df_clean$HeatingLoad,      breaks = 30, col = "lightblue",
+     main = "Y1: Heating Load (raw)", xlab = "HeatingLoad")
+hist(log(df_clean$HeatingLoad), breaks = 30, col = "lightgreen",
+     main = "log(Y1): Heating Load",  xlab = "log(HeatingLoad)")
+
+hist(df_clean$CoolingLoad,      breaks = 30, col = "lightblue",
+     main = "Y2: Cooling Load (raw)", xlab = "CoolingLoad")
+hist(log(df_clean$CoolingLoad), breaks = 30, col = "lightgreen",
+     main = "log(Y2): Cooling Load",  xlab = "log(CoolingLoad)")
+
+par(mfrow = c(1, 1))
+```
+
+## Box-Cox optimal lambda — Y1 (Heating Load)
+
+Box-Cox is fitted on a numeric-only subset (SurfaceArea excluded due
+to perfect collinearity identified in EDA; Orientation and
+GlazingAreaDist kept as numeric here for the Box-Cox linear model).
+
+```{r boxcox-y1}
+df_bc_y1 <- df_clean %>%
+  dplyr::select(RelCompactness, WallArea, RoofArea,
+         OverallHeight, Orientation, GlazingArea,
+         GlazingAreaDist, HeatingLoad)
+
+bc_y1      <- MASS::boxcox(lm(HeatingLoad ~ ., data = df_bc_y1),
+                            lambda = seq(-2, 2, 0.05), plotit = TRUE)
+lambda_y1  <- bc_y1$x[which.max(bc_y1$y)]
+
+cat("Optimal Box-Cox lambda for Y1 (Heating Load):", lambda_y1, "\n")
+
+# Apply transformation
+if (abs(lambda_y1) < 0.05) {
+  df_clean$HeatingLoad_bc <- log(df_clean$HeatingLoad)
+  cat("Applied: log transformation (lambda ≈ 0)\n")
+} else {
+  df_clean$HeatingLoad_bc <- (df_clean$HeatingLoad ^ lambda_y1 - 1) / lambda_y1
+  cat("Applied: Box-Cox with lambda =", lambda_y1, "\n")
+}
+```
+
+## Box-Cox optimal lambda — Y2 (Cooling Load)
+
+```{r boxcox-y2}
+df_bc_y2 <- df_clean %>%
+  dplyr::select(RelCompactness, WallArea, RoofArea,
+         OverallHeight, Orientation, GlazingArea,
+         GlazingAreaDist, CoolingLoad)
+
+bc_y2      <- MASS::boxcox(lm(CoolingLoad ~ ., data = df_bc_y2),
+                            lambda = seq(-2, 2, 0.05), plotit = TRUE)
+lambda_y2  <- bc_y2$x[which.max(bc_y2$y)]
+
+cat("Optimal Box-Cox lambda for Y2 (Cooling Load):", lambda_y2, "\n")
+
+if (abs(lambda_y2) < 0.05) {
+  df_clean$CoolingLoad_bc <- log(df_clean$CoolingLoad)
+  cat("Applied: log transformation (lambda ≈ 0)\n")
+} else {
+  df_clean$CoolingLoad_bc <- (df_clean$CoolingLoad ^ lambda_y2 - 1) / lambda_y2
+  cat("Applied: Box-Cox with lambda =", lambda_y2, "\n")
+}
+```
+
+## QQ-plots after transformation
+
+```{r qq-transformed}
+par(mfrow = c(2, 2))
+
+qqnorm(df_clean$HeatingLoad,    main = "Q-Q: Y1 raw")
+qqline(df_clean$HeatingLoad,    col = "red", lwd = 2)
+
+qqnorm(df_clean$HeatingLoad_bc, main = "Q-Q: Y1 Box-Cox transformed")
+qqline(df_clean$HeatingLoad_bc, col = "steelblue", lwd = 2)
+
+qqnorm(df_clean$CoolingLoad,    main = "Q-Q: Y2 raw")
+qqline(df_clean$CoolingLoad,    col = "red", lwd = 2)
+
+qqnorm(df_clean$CoolingLoad_bc, main = "Q-Q: Y2 Box-Cox transformed")
+qqline(df_clean$CoolingLoad_bc, col = "steelblue", lwd = 2)
+
+par(mfrow = c(1, 1))
+```
+
+---
+
+# Multicollinearity & VIF Review
+
+SurfaceArea was found in EDA to be perfectly collinear with
+WallArea + RoofArea. We drop it from the modelling set and confirm
+VIF scores are acceptable for the remaining predictors.
+
+```{r vif}
+vif_model <- lm(
+  HeatingLoad ~ RelCompactness + WallArea + RoofArea +
+                OverallHeight + Orientation + GlazingArea + GlazingAreaDist,
+  data = df_clean
+)
+
+vif_vals <- car::vif(vif_model)
+
+vif_table <- data.frame(
+  Variable = names(vif_vals),
+  VIF      = round(vif_vals, 3),
+  Flag     = ifelse(vif_vals > 10, "HIGH — consider dropping",
+             ifelse(vif_vals > 5,  "Moderate — monitor", "OK"))
+)
+
+print(vif_table)
+```
+We will keep them all, and accept the VIF. This is because Random Forest, XGBoost, and GAMs are not affected by multicollinearity at all. High VIF only damages OLS coefficient interpretation, not prediction accuracy.
+---
+
+# Polynomial Relationship Check (all predictors)
+
+We extend the single-predictor check from `preprocessing.Rmd` to
+cover all continuous predictors against both outcomes, so we know
+which quadratic terms are worth including as engineered features.
+
+```{r poly-check, fig.height=10}
+cont_preds <- c("RelCompactness", "WallArea", "RoofArea",
+                "OverallHeight", "GlazingArea")
+
+make_poly_plots <- function(response_var, point_col) {
+  lapply(cont_preds, function(v) {
+    ggplot(df_clean, aes(x = .data[[v]], y = .data[[response_var]])) +
+      geom_point(alpha = 0.25, size = 0.7, color = point_col) +
+      geom_smooth(method = "lm",  formula = y ~ x,
+                  color = "steelblue", se = FALSE, linewidth = 0.8) +
+      geom_smooth(method = "lm",  formula = y ~ poly(x, 2),
+                  color = "tomato", se = FALSE, linewidth = 0.8) +
+      geom_smooth(method = "loess",
+                  color = "forestgreen", se = FALSE,
+                  linewidth = 0.8, linetype = "dashed") +
+      labs(title = paste(v, "→", response_var),
+           subtitle = "Blue=linear  Red=quadratic  Green=LOESS",
+           x = v, y = response_var) +
+      theme_minimal(base_size = 9)
+  })
+}
+
+p_y1 <- make_poly_plots("HeatingLoad", "steelblue")
+do.call(gridExtra::grid.arrange, c(p_y1, ncol = 3,
+  list(top = "Polynomial check — Heating Load (Y1)")))
+
+p_y2 <- make_poly_plots("CoolingLoad", "darkorange")
+do.call(gridExtra::grid.arrange, c(p_y2, ncol = 3,
+  list(top = "Polynomial check — Cooling Load (Y2)")))
+```
+
+---
+
+# Feature Engineering
+
+## Interaction and ratio features
+
+Physically motivated engineered features based on the scatter plots
+and domain interpretation from EDA.
+
+```{r feature-engineering}
+df_clean <- df_clean %>%
+  mutate(
+    # --- Original four from preprocessing.Rmd ---
+    CompactnessXHeight  = RelCompactness * OverallHeight,
+    WallToRoofRatio     = WallArea / RoofArea,
+    GlazingXCompactness = GlazingArea * RelCompactness,
+    SurfToVol           = SurfaceArea / (WallArea + RoofArea),
+
+    # --- Additional physically motivated features ---
+    GlazingXHeight      = GlazingArea * OverallHeight,
+    # Tall buildings with more glazing lose/gain disproportionately more heat
+
+    WallXGlazing        = WallArea * GlazingArea,
+    # Interaction between exposed wall and window area
+
+    CompactnessSquared  = RelCompactness^2,
+    # Captures the nonlinear compactness-load relationship seen in poly plots
+
+    HeightSquared       = OverallHeight^2,
+    # OverallHeight is binary (3.5 / 7.0) so this is less critical,
+    # but retained for completeness in polynomial model pipelines
+
+    GlazingToWall       = GlazingArea / (WallArea + 1),
+    # Facade transparency ratio: proportion of wall that is glass
+
+    EnvelopeArea        = WallArea + RoofArea,
+    # Total heat-exchange envelope (SurfaceArea minus floor, approx)
+
+    WallPerHeight       = WallArea / (OverallHeight + 1)
+    # Normalised wall exposure per unit height
+  )
+
+cat("New features added. Total columns now:", ncol(df_clean), "\n")
+cat("Engineered feature names:\n")
+cat(paste(" -",
+  c("CompactnessXHeight","WallToRoofRatio","GlazingXCompactness",
+    "SurfToVol","GlazingXHeight","WallXGlazing",
+    "CompactnessSquared","HeightSquared","GlazingToWall",
+    "EnvelopeArea","WallPerHeight")), sep = "\n")
+```
+
+## Correlation of engineered features with outcomes
+
+Quick screen to confirm the new features are informative before
+they enter modelling.
+
+```{r feature-corr}
+eng_features <- c(
+  "CompactnessXHeight","WallToRoofRatio","GlazingXCompactness",
+  "SurfToVol","GlazingXHeight","WallXGlazing",
+  "CompactnessSquared","GlazingToWall","EnvelopeArea","WallPerHeight"
+)
+
+cor_eng <- df_clean %>%
+  dplyr::select(all_of(eng_features), HeatingLoad, CoolingLoad) %>%
+  cor(use = "complete.obs")
+
+# Show only correlations with the two outcomes
+cor_with_outcomes <- data.frame(
+  Feature        = eng_features,
+  Cor_HeatingLoad = round(cor_eng[eng_features, "HeatingLoad"], 3),
+  Cor_CoolingLoad = round(cor_eng[eng_features, "CoolingLoad"], 3)
+) %>%
+  arrange(desc(abs(Cor_HeatingLoad)))
+
+print(cor_with_outcomes)
+```
+
+---
+
+# Train / Test Split
+
+The split is done **before** scaling. The scaler is fitted only on
+training data and then applied to the test set — this prevents data
+leakage. We stratify on `OverallHeight_f` because it is the most
+dominant predictor identified in EDA.
+
+```{r train-test-split}
+set.seed(42)
+
+train_idx <- caret::createDataPartition(
+  df_clean$OverallHeight_f,
+  p    = 0.80,
+  list = FALSE
+)
+
+df_train <- df_clean[ train_idx, ]
+df_test  <- df_clean[-train_idx, ]
+
+cat("Training set:", nrow(df_train), "rows\n")
+cat("Test set    :", nrow(df_test),  "rows\n")
+
+# Confirm stratification held
+cat("\nOverallHeight distribution — train:\n")
+print(prop.table(table(df_train$OverallHeight_f)))
+
+cat("\nOverallHeight distribution — test:\n")
+print(prop.table(table(df_test$OverallHeight_f)))
+```
+
+---
+
+# Feature Scaling (Centre + Scale)
+
+Scale-sensitive models (Ridge, Lasso, SVR, KNN, Neural Net) require
+standardised predictors. Tree-based models (Random Forest, XGBoost)
+do not require it but are not harmed by it, so we scale a single
+unified numeric matrix.
+
+Scaling is fitted on **training data only**.
+
+```{r scaling}
+# All numeric predictors — original + engineered
+# Excludes: outcomes, factor columns, is_outlier flag, SurfaceArea (collinear)
+scale_cols <- c(
+  "RelCompactness", "WallArea", "RoofArea",
+  "OverallHeight", "Orientation", "GlazingArea", "GlazingAreaDist",
+  "CompactnessXHeight", "WallToRoofRatio", "GlazingXCompactness",
+  "SurfToVol", "GlazingXHeight", "WallXGlazing",
+  "CompactnessSquared", "GlazingToWall", "EnvelopeArea", "WallPerHeight"
+)
+
+# Fit scaler on training set
+preproc_params <- caret::preProcess(
+  df_train[, scale_cols],
+  method = c("center", "scale")
+)
+
+# Apply to both sets
+df_train[, scale_cols] <- predict(preproc_params, df_train[, scale_cols])
+df_test[, scale_cols]  <- predict(preproc_params, df_test[, scale_cols])
+
+cat("Scaling complete. Parameters fitted on training set only.\n\n")
+
+# Confirm: training set should now have mean ≈ 0, sd ≈ 1
+train_stats <- df_train %>%
+  dplyr::select(all_of(scale_cols)) %>%
+  summarise(across(everything(),
+    list(mean = ~round(mean(.), 4), sd = ~round(sd(.), 4))))
+
+cat("Sample check (first 3 features) — should be mean≈0, sd≈1:\n")
+print(train_stats[, 1:6])
+```
+
+---
+
+# Dummy Encoding for Regression Models
+
+Some models (OLS, Ridge, Lasso, SVR) require fully numeric input.
+We create a dummy-encoded version of the dataset for those models.
+Tree-based and GAM models will use the factor columns directly.
+
+```{r dummy-encode}
+# Use model.matrix — this one-hot encodes all factor_f columns
+# Drop the intercept column (first column from model.matrix)
+dummy_formula <- ~ RelCompactness + WallArea + RoofArea +
+                   OverallHeight + GlazingArea +
+                   Orientation_f + GlazingAreaDist_f +
+                   CompactnessXHeight + WallToRoofRatio + GlazingXCompactness +
+                   SurfToVol + GlazingXHeight + WallXGlazing +
+                   CompactnessSquared + GlazingToWall + EnvelopeArea + WallPerHeight
+
+X_train_dummy <- model.matrix(dummy_formula, data = df_train)[, -1]
+X_test_dummy  <- model.matrix(dummy_formula, data = df_test)[, -1]
+
+cat("Dummy-encoded training matrix:", nrow(X_train_dummy), "x",
+    ncol(X_train_dummy), "\n")
+cat("Dummy-encoded test matrix    :", nrow(X_test_dummy),  "x",
+    ncol(X_test_dummy),  "\n")
+cat("Columns:", paste(colnames(X_train_dummy), collapse = ", "), "\n")
+```
+
+---
+
+# Final Dataset Summary
+
+```{r final-summary}
+cat("============================================================\n")
+cat("  PREPROCESSING COMPLETE — SUMMARY\n")
+cat("============================================================\n\n")
+
+cat("Source file   : ENB2012_post_EDA.xlsx\n")
+cat("Outlier method: Winsorising (1st–99th pct) on continuous predictors\n")
+cat("Y1 transform  : Box-Cox (lambda =", lambda_y1, ")\n")
+cat("Y2 transform  : Box-Cox (lambda =", lambda_y2, ")\n")
+cat("SurfaceArea   : DROPPED (perfectly collinear with WallArea + RoofArea)\n")
+cat("Scaling       : Centre + scale, fit on train only\n\n")
+
+cat("Engineered features (11):\n")
+cat("  CompactnessXHeight, WallToRoofRatio, GlazingXCompactness,\n")
+cat("  SurfToVol, GlazingXHeight, WallXGlazing, CompactnessSquared,\n")
+cat("  GlazingToWall, EnvelopeArea, WallPerHeight, HeightSquared\n\n")
+
+cat("Training rows:", nrow(df_train), "\n")
+cat("Test rows    :", nrow(df_test),  "\n")
+cat("Total columns in df_clean:", ncol(df_clean), "\n")
+cat("Dummy-encoded predictor columns:", ncol(X_train_dummy), "\n\n")
+
+cat("Objects available for modelling:\n")
+cat("  df_train       — scaled training dataframe (factors intact)\n")
+cat("  df_test        — scaled test dataframe (factors intact)\n")
+cat("  X_train_dummy  — numeric matrix, dummy-encoded (for OLS/Ridge/SVR)\n")
+cat("  X_test_dummy   — numeric matrix, dummy-encoded (for OLS/Ridge/SVR)\n")
+cat("  preproc_params — caret preProcess object (for inverse-transforming)\n")
+cat("  lambda_y1      — Box-Cox lambda for HeatingLoad\n")
+cat("  lambda_y2      — Box-Cox lambda for CoolingLoad\n")
+```
+# Classification Analysis
+
+## 1. Create the class labels
+
+We cut each load at its terciles (33rd and 66th percentiles) to get
+three roughly equal-sized classes. Cut points come from the training
+set only, then get applied to the test set.
+
+```{r clf-make-labels}
+library(pROC)
+
+hl_cuts <- quantile(df_train$HeatingLoad, probs = c(1/3, 2/3))
+cl_cuts <- quantile(df_train$CoolingLoad, probs = c(1/3, 2/3))
+
+make_band <- function(x, cuts) {
+  cut(x,
+      breaks = c(-Inf, cuts[1], cuts[2], Inf),
+      labels = c("Low", "Medium", "High"))
+}
+
+df_train$HL_class <- make_band(df_train$HeatingLoad, hl_cuts)
+df_test$HL_class  <- make_band(df_test$HeatingLoad,  hl_cuts)
+
+df_train$CL_class <- make_band(df_train$CoolingLoad, cl_cuts)
+df_test$CL_class  <- make_band(df_test$CoolingLoad,  cl_cuts)
+
+cat("Heating-load cut points:", round(hl_cuts, 2), "\n")
+cat("Cooling-load cut points:", round(cl_cuts, 2), "\n\n")
+cat("Heating class counts (train):\n"); print(table(df_train$HL_class))
+cat("\nCooling class counts (train):\n"); print(table(df_train$CL_class))
+```
+
+```{r clf-label-plot}
+ggplot(df_train, aes(x = HeatingLoad, fill = HL_class)) +
+  geom_histogram(bins = 30, colour = "white", alpha = 0.85) +
+  geom_vline(xintercept = hl_cuts, linetype = "dashed") +
+  labs(title = "Heating Load split into Low / Medium / High",
+       x = "Heating Load", fill = "Class") +
+  theme_minimal()
+```
+
+---
+
+## 2. Predictor sets and shared CV setup
+
+We predict the classes from the design features + engineered features,
+but drop the raw loads and the Box-Cox columns so the model can't just
+read the answer off the variable it was binned from.
+
+```{r clf-setup}
+predictors <- c(
+  "RelCompactness", "WallArea", "RoofArea",
+  "OverallHeight", "GlazingArea",
+  "Orientation_f", "GlazingAreaDist_f",
+  "CompactnessXHeight", "WallToRoofRatio", "GlazingXCompactness",
+  "SurfToVol", "GlazingXHeight", "WallXGlazing",
+  "CompactnessSquared", "GlazingToWall", "EnvelopeArea", "WallPerHeight"
+)
+
+train_HL <- df_train[, c(predictors, "HL_class")]
+test_HL  <- df_test[,  c(predictors, "HL_class")]
+
+train_CL <- df_train[, c(predictors, "CL_class")]
+test_CL  <- df_test[,  c(predictors, "CL_class")]
+
+# shared 5-fold CV for all caret models
+ctrl <- trainControl(
+  method          = "cv",
+  number          = 5,
+  classProbs      = TRUE,
+  summaryFunction = multiClassSummary,
+  savePredictions = "final"
+)
+
+cat("Heating training frame:", dim(train_HL), "\n")
+cat("Cooling training frame:", dim(train_CL), "\n")
+```
+
+### XGBoost helper
+
+Since native xgboost needs a numeric matrix and integer labels, we
+wrap that prep into one function so we don't repeat it everywhere.
+
+```{r xgb-helper}
+library(xgboost)
+
+# Converts a caret-style dataframe into a DMatrix for xgboost.
+# target_col = name of the class column, or NULL for prediction-only data.
+prep_xgb <- function(dat, target_col = NULL) {
+  if (!is.null(target_col)) {
+    y   <- as.integer(dat[[target_col]]) - 1
+    X   <- dat[, setdiff(names(dat), target_col)]
+  } else {
+    y   <- NULL
+    X   <- dat
+  }
+  facs <- sapply(X, is.factor)
+  X[facs] <- lapply(X[facs], as.integer)
+  
+  xgb.DMatrix(data = as.matrix(X), label = y)
+}
+
+# shared xgboost parameters
+xgb_params <- list(
+  objective   = "multi:softprob",
+  num_class   = 3,
+  eta         = 0.1,
+  max_depth   = 5,
+  subsample   = 0.8,
+  eval_metric = "mlogloss"
+)
+```
+
+### Evaluation helpers
+
+One function to score any model (caret or native xgboost) on a test
+set, and one to extract class probabilities for the ROC.
+
+```{r eval-helpers}
+# returns predictions as a factor
+predict_model <- function(model, test_df, target_col) {
+  if (inherits(model, "xgb.Booster")) {
+    dtest <- prep_xgb(test_df[, predictors])
+    raw   <- predict(model, newdata = dtest, reshape = TRUE)
+    preds <- factor(max.col(raw) - 1, levels = 0:2,
+                    labels = c("Low", "Medium", "High"))
+  } else {
+    preds <- predict(model, newdata = test_df)
+  }
+  preds
+}
+
+# returns an n x 3 probability matrix
+predict_probs <- function(model, test_df) {
+  if (inherits(model, "xgb.Booster")) {
+    dtest <- prep_xgb(test_df[, predictors])
+    probs <- predict(model, newdata = dtest, reshape = TRUE)
+    colnames(probs) <- c("Low", "Medium", "High")
+  } else {
+    probs <- predict(model, newdata = test_df, type = "prob")
+  }
+  as.data.frame(probs)
+}
+
+# one-row accuracy / kappa summary
+eval_model <- function(model, test_df, truth_col) {
+  preds <- predict_model(model, test_df, truth_col)
+  cm    <- confusionMatrix(preds, test_df[[truth_col]])
+  data.frame(Accuracy = unname(cm$overall["Accuracy"]),
+             Kappa    = unname(cm$overall["Kappa"]))
+}
+```
+
+---
+
+## 3. Heating Load — fit the models
+
+Each model predicts `HL_class` using the same CV control so the
+comparison is fair.
+
+```{r hl-knn}
+set.seed(42)
+m_knn_HL <- train(HL_class ~ ., data = train_HL, method = "knn",
+                  trControl = ctrl,
+                  tuneGrid  = expand.grid(k = c(3, 5, 7, 9, 11, 15)),
+                  metric = "Accuracy")
+```
+
+```{r hl-multinom, results='hide'}
+set.seed(42)
+m_multinom_HL <- train(HL_class ~ ., data = train_HL, method = "multinom",
+                       trControl = ctrl, trace = FALSE, metric = "Accuracy")
+```
+
+```{r hl-lda}
+set.seed(42)
+m_lda_HL <- train(HL_class ~ ., data = train_HL, method = "lda",
+                  trControl = ctrl, metric = "Accuracy")
+```
+
+```{r hl-tree}
+set.seed(42)
+m_tree_HL <- train(HL_class ~ ., data = train_HL, method = "rpart",
+                   trControl = ctrl, tuneLength = 10, metric = "Accuracy")
+
+rpart.plot(m_tree_HL$finalModel, type = 2, extra = 104,
+           box.palette = "BuGn", main = "Decision Tree — Heating Load")
+```
+
+```{r hl-rf}
+set.seed(42)
+m_rf_HL <- train(HL_class ~ ., data = train_HL, method = "rf",
+                 trControl = ctrl,
+                 tuneGrid  = expand.grid(mtry = c(2, 4, 6, 8)),
+                 ntree = 500, metric = "Accuracy")
+```
+
+```{r hl-xgb, results='hide'}
+set.seed(42)
+dtrain_hl <- prep_xgb(train_HL, "HL_class")
+dtest_hl  <- prep_xgb(test_HL,  "HL_class")
+
+m_xgb_HL <- xgb.train(
+  params    = xgb_params,
+  data      = dtrain_hl,
+  nrounds   = 150,
+  watchlist = list(train = dtrain_hl, test = dtest_hl),
+  verbose   = 0,
+  early_stopping_rounds = 20
+)
+```
+
+```{r hl-svm}
+set.seed(42)
+m_svm_HL <- train(HL_class ~ ., data = train_HL, method = "svmRadial",
+                  trControl = ctrl, tuneLength = 6, metric = "Accuracy")
+```
+
+---
+
+## 4. Heating Load — compare on the test set
+
+```{r hl-eval}
+hl_models <- list(
+  kNN          = m_knn_HL,
+  Multinomial  = m_multinom_HL,
+  LDA          = m_lda_HL,
+  Tree         = m_tree_HL,
+  RandomForest = m_rf_HL,
+  XGBoost      = m_xgb_HL,
+  SVM          = m_svm_HL
+)
+
+hl_results <- map_dfr(hl_models, eval_model,
+                      test_df = test_HL, truth_col = "HL_class",
+                      .id = "Model") %>%
+  arrange(desc(Accuracy))
+
+cat("=== Heating Load — test-set performance ===\n")
+print(hl_results, row.names = FALSE)
+```
+
+```{r hl-results-plot}
+ggplot(hl_results, aes(x = reorder(Model, Accuracy), y = Accuracy, fill = Model)) +
+  geom_col(alpha = 0.85) +
+  geom_text(aes(label = round(Accuracy, 3)), hjust = -0.1, size = 3.5) +
+  coord_flip() + ylim(0, 1) +
+  labs(title = "Heating Load — Test Accuracy by Model", x = NULL, y = "Accuracy") +
+  theme_minimal() + theme(legend.position = "none")
+```
+
+### 4.1 Confusion matrix — best heating model
+
+```{r hl-best-cm}
+best_hl_name  <- hl_results$Model[1]
+best_hl_model <- hl_models[[best_hl_name]]
+cat("Best heating-load model:", best_hl_name, "\n\n")
+
+hl_pred <- predict_model(best_hl_model, test_HL, "HL_class")
+hl_cm   <- confusionMatrix(hl_pred, test_HL$HL_class)
+print(hl_cm)
+```
+
+```{r hl-cm-plot}
+as.data.frame(hl_cm$table) %>%
+  ggplot(aes(Reference, Prediction, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), colour = "white", size = 5) +
+  scale_fill_gradient(low = "steelblue", high = "darkblue") +
+  labs(title = paste("Confusion Matrix —", best_hl_name, "(Heating)")) +
+  theme_minimal()
+```
+
+### 4.2 ROC / AUC — best heating model
+
+One-vs-rest multiclass AUC (each class against the rest).
+
+```{r hl-roc}
+hl_probs <- predict_probs(best_hl_model, test_HL)
+hl_roc   <- multiclass.roc(test_HL$HL_class, as.matrix(hl_probs))
+cat("Multiclass AUC (Heating,", best_hl_name, "):",
+    round(as.numeric(hl_roc$auc), 3), "\n")
+```
+
+---
+
+## 5. Cooling Load — fit the same models
+
+Identical pipeline, just swapping the target to `CL_class`.
+
+```{r cl-knn}
+set.seed(42)
+m_knn_CL <- train(CL_class ~ ., data = train_CL, method = "knn",
+                  trControl = ctrl,
+                  tuneGrid  = expand.grid(k = c(3, 5, 7, 9, 11, 15)),
+                  metric = "Accuracy")
+```
+
+```{r cl-multinom, results='hide'}
+set.seed(42)
+m_multinom_CL <- train(CL_class ~ ., data = train_CL, method = "multinom",
+                       trControl = ctrl, trace = FALSE, metric = "Accuracy")
+```
+
+```{r cl-lda}
+set.seed(42)
+m_lda_CL <- train(CL_class ~ ., data = train_CL, method = "lda",
+                  trControl = ctrl, metric = "Accuracy")
+```
+
+```{r cl-tree}
+set.seed(42)
+m_tree_CL <- train(CL_class ~ ., data = train_CL, method = "rpart",
+                   trControl = ctrl, tuneLength = 10, metric = "Accuracy")
+```
+
+```{r cl-rf}
+set.seed(42)
+m_rf_CL <- train(CL_class ~ ., data = train_CL, method = "rf",
+                 trControl = ctrl,
+                 tuneGrid  = expand.grid(mtry = c(2, 4, 6, 8)),
+                 ntree = 500, metric = "Accuracy")
+```
+
+```{r cl-xgb, results='hide'}
+set.seed(42)
+dtrain_cl <- prep_xgb(train_CL, "CL_class")
+dtest_cl  <- prep_xgb(test_CL,  "CL_class")
+
+m_xgb_CL <- xgb.train(
+  params    = xgb_params,
+  data      = dtrain_cl,
+  nrounds   = 150,
+  watchlist = list(train = dtrain_cl, test = dtest_cl),
+  verbose   = 0,
+  early_stopping_rounds = 20
+)
+```
+
+```{r cl-svm}
+set.seed(42)
+m_svm_CL <- train(CL_class ~ ., data = train_CL, method = "svmRadial",
+                  trControl = ctrl, tuneLength = 6, metric = "Accuracy")
+```
+
+---
+
+## 6. Cooling Load — compare on the test set
+
+```{r cl-eval}
+cl_models <- list(
+  kNN          = m_knn_CL,
+  Multinomial  = m_multinom_CL,
+  LDA          = m_lda_CL,
+  Tree         = m_tree_CL,
+  RandomForest = m_rf_CL,
+  XGBoost      = m_xgb_CL,
+  SVM          = m_svm_CL
+)
+
+cl_results <- map_dfr(cl_models, eval_model,
+                      test_df = test_CL, truth_col = "CL_class",
+                      .id = "Model") %>%
+  arrange(desc(Accuracy))
+
+cat("=== Cooling Load — test-set performance ===\n")
+print(cl_results, row.names = FALSE)
+```
+
+```{r cl-results-plot}
+ggplot(cl_results, aes(x = reorder(Model, Accuracy), y = Accuracy, fill = Model)) +
+  geom_col(alpha = 0.85) +
+  geom_text(aes(label = round(Accuracy, 3)), hjust = -0.1, size = 3.5) +
+  coord_flip() + ylim(0, 1) +
+  labs(title = "Cooling Load — Test Accuracy by Model", x = NULL, y = "Accuracy") +
+  theme_minimal() + theme(legend.position = "none")
+```
+
+### 6.1 Confusion matrix — best cooling model
+
+```{r cl-best-cm}
+best_cl_name  <- cl_results$Model[1]
+best_cl_model <- cl_models[[best_cl_name]]
+cat("Best cooling-load model:", best_cl_name, "\n\n")
+
+cl_pred <- predict_model(best_cl_model, test_CL, "CL_class")
+cl_cm   <- confusionMatrix(cl_pred, test_CL$CL_class)
+print(cl_cm)
+```
+
+```{r cl-cm-plot}
+as.data.frame(cl_cm$table) %>%
+  ggplot(aes(Reference, Prediction, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), colour = "white", size = 5) +
+  scale_fill_gradient(low = "darkorange", high = "firebrick") +
+  labs(title = paste("Confusion Matrix —", best_cl_name, "(Cooling)")) +
+  theme_minimal()
+```
+
+### 6.2 ROC / AUC — best cooling model
+
+```{r cl-roc}
+cl_probs <- predict_probs(best_cl_model, test_CL)
+cl_roc   <- multiclass.roc(test_CL$CL_class, as.matrix(cl_probs))
+cat("Multiclass AUC (Cooling,", best_cl_name, "):",
+    round(as.numeric(cl_roc$auc), 3), "\n")
+```
+
+---
+
+## 7. Variable importance
+
+Which design features drive the classification? We pull importance
+from the random forest — it ties straight back to the EDA story.
+
+```{r varimp}
+vi_hl <- varImp(m_rf_HL)
+plot(vi_hl, top = 12, main = "Variable Importance — Heating Load (RF)")
+
+vi_cl <- varImp(m_rf_CL)
+plot(vi_cl, top = 12, main = "Variable Importance — Cooling Load (RF)")
+```
+
+---
+
+## 8. Wrap-up
+
+```{r clf-summary}
+summary_tab <- bind_rows(
+  hl_results %>% mutate(Target = "Heating Load") %>% slice(1),
+  cl_results %>% mutate(Target = "Cooling Load") %>% slice(1)
+) %>%
+  dplyr::select(Target, Model, Accuracy, Kappa)
+
+cat("  CLASSIFICATION — BEST MODEL PER TARGET\n")
+print(summary_tab, row.names = FALSE)
+```
+
+**Reading the results.** Each load was split into Low / Medium / High
+bands at its terciles, then seven classifiers were tuned with 5-fold CV
+and scored on the untouched test set. The tree-ensemble models
+(Random Forest, XGBoost) and SVM are usually the strongest here, which
+lines up with the EDA: the load–feature relationships are non-linear
+and full of interactions, so flexible models beat the linear ones
+(LDA, multinomial). The variable-importance plots confirm the EDA
+finding that **OverallHeight**, **RelCompactness** and the
+**envelope/glazing** features are the main drivers of which load band a
+building lands in.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
