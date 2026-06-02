@@ -23,6 +23,11 @@ knitr::opts_chunk$set(
 )
 ```
 
+```{r figures-dir, include=FALSE}
+# Directory where all plot files are written
+if (!dir.exists("figures")) dir.create("figures")
+```
+
 ---
 
 # Setup & Data Preparation
@@ -286,10 +291,10 @@ print(p1)
 print(p2)
 print(p3)
 
-# Optional: save to file
-# ggsave("correlation_original.png", p1, width = 8, height = 7, dpi = 150)
-# ggsave("correlation_engineered.png", p2, width = 6, height = 5, dpi = 150)
-# ggsave("correlation_all.png", p3, width = 10, height = 9, dpi = 150)
+# Save figures to disk
+ggsave("figures/correlation_original.png",   p1, width = 8,  height = 7, dpi = 300)
+ggsave("figures/correlation_engineered.png", p2, width = 6,  height = 5, dpi = 300)
+ggsave("figures/correlation_all.png",        p3, width = 10, height = 9, dpi = 300)
 ```
 
 
@@ -322,6 +327,7 @@ print(perf_ols_hl)
 residual_plots(ols_hl,
                fitted(ols_hl), residuals(ols_hl),
                "OLS Heating Load")
+dev.print(png, "figures/ols_diagnostics_hl.png", width = 1100, height = 800, res = 120)
 ```
 Residuals vs Fitted-they show some level of non-linearity.
 Scale-Location-There is mild heteroscedasticity(the model's prediction errors are not equally sized across the range of HeatingLoad). 
@@ -363,6 +369,7 @@ print(perf_ols_cl)
 residual_plots(ols_cl,
                fitted(ols_cl), residuals(ols_cl),
                "OLS ooling Load")
+dev.print(png, "figures/ols_diagnostics_cl.png", width = 1100, height = 800, res = 120)
 ```
 The Cooling Load model has more pronounced heteroscedasticity and stronger non-normality in the upper tail suggesting that the linear model struggles more with buildings that have unusually high cooling demands. 
 
@@ -403,6 +410,7 @@ best_lambda_ridge_hl <- ridge_cv_hl$lambda.min
 cat("Best λ (Ridge, HL):", best_lambda_ridge_hl, "\n")
 
 plot(ridge_cv_hl, main = "Ridge CV – Heating Load")
+dev.print(png, "figures/ridge_cv_hl.png", width = 900, height = 650, res = 120)
 
 ridge_hl       <- glmnet(X_train_hl, y_train_hl, alpha = 0, lambda = best_lambda_ridge_hl)
 pred_ridge_hl  <- predict(ridge_hl, newx = X_test_hl)
@@ -446,6 +454,7 @@ best_lambda_lasso_hl <- lasso_cv_hl$lambda.min
 cat("Best λ (LASSO, HL):", best_lambda_lasso_hl, "\n")
 
 plot(lasso_cv_hl, main = "LASSO CV – Heating Load")
+dev.print(png, "figures/lasso_cv_hl.png", width = 900, height = 650, res = 120)
 
 lasso_hl      <- glmnet(X_train_hl, y_train_hl, alpha = 1, lambda = best_lambda_lasso_hl)
 pred_lasso_hl <- predict(lasso_hl, newx = X_test_hl)
@@ -543,6 +552,7 @@ ggplot(tibble(actual = test_cl$CoolingLoad, predicted = pred_poly_cl),
   labs(title = "Polynomial Regression – Predicted vs Actual",
        subtitle = "Cooling Load", x = "Actual", y = "Predicted") +
   theme_minimal(base_size = 11)
+ggsave("figures/poly_pred_vs_actual_cl.png", width = 8, height = 6, dpi = 300)
 ```
 Cooling Load: R² = 0.917 is still strong but lower and the scatter is visibly wider,especially the band of points around the 25–30 actual range that sit above the line (the model slightly over-predicts there) and the looser spread at the high end.This matches what you flagged earlier in the OLS section: cooling load is genuinely harder to model, with more variability for buildings that have higher cooling demand.
 
@@ -572,393 +582,10 @@ ggplot(tibble(actual = test_hl$HeatingLoad, predicted = pred_poly_hl),
   labs(title = "Polynomial Regression – Predicted vs Actual",
        subtitle = "Heating Load", x = "Actual", y = "Predicted") +
   theme_minimal(base_size = 11)
+ggsave("figures/poly_pred_vs_actual_hl.png", width = 8, height = 6, dpi = 300)
 
 ```
 Heating Load: R² = 0.943 means the model explains about 94% of the variation in heating load, and the points hug the red line tightly across the whole range with no obvious curving away from it. The RMSE of 2.412 means typical predictions are off by roughly 2.4 units,a good fit with no systematic bias.
-
-
-# Part B: Semi-Parametric Regression Models
-
-## B1. Generalised Additive Model (GAM)
-
-GAMs allow smooth, non-parametric spline fits for continuous predictors while
-retaining interpretable parametric terms for discrete variables.
-
-```{r gam-hl}
-gam_hl <- gam(
-  HeatingLoad ~
-    s(RelCompactness, k = 6) +
-    s(WallArea,       k = 6) +
-    s(RoofArea,       k = 3) +   # same fix
-    factor(OverallHeight) +
-    factor(GlazingArea) +
-    factor(Orientation) +
-    factor(GlazingAreaDist),
-  data   = train_hl,
-  method = "REML"
-)
-```
-
-```{r gam-hl-plots}
-# Smooth component plots
-par(mfrow = c(2, 3))
-plot(gam_hl, shade = TRUE, shade.col = "blue",
-     residuals = TRUE, pch = 1, cex = 0.3,
-     seWithMean = TRUE)
-par(mfrow = c(1, 1))
-```
-RelCompactness (edf = 4.66): The wiggliest term,it dips, flattens around 0.75–0.80, then rises steeply past 0.85. This is a genuinely non-linear effect, which justifies using a GAM here: a straight line would miss that the relationship reverses direction.
-
-WallArea (edf = 4.32): A smooth, mostly increasing curve,more wall area means higher heating load. It's gently non-linear (curving) but the trend is consistently upward.
-
-RoofArea (edf = 1): Effectively a straight line. The edf of 1 tells you the spline collapsed to linear, meaning roof area has a simple linear effect and didn't need a smooth at all,you could model it with a plain linear term and lose nothing
-
-
-RelCompactness is the predictor with the strongest non-linear behaviour, WallArea is mildly non-linear, and RoofArea is essentially linear,which is exactly the kind of insight a GAM gives you that OLS can't.
-
-```{r gam-hl-diagnostics}
-# GAM-specific diagnostics
-gam.check(gam_hl)
-```
-These explain why the GAM does so well.It picked up that RelCompactness bends and reverses direction, that WallArea curves upward, and that RoofArea is just a straight line. A plain linear model is forced to draw straight lines through all three, so it misses the curves,the GAM bends where the data bends, which is where the extra accuracy comes from.
-
-
-```{r gam-hl-metrics}
-pred_gam_hl <- predict(gam_hl, newdata = test_hl)
-perf_gam_hl <- eval_metrics("GAM", test_hl$HeatingLoad, pred_gam_hl)
-print(perf_gam_hl)
-
-pred_actual_plot(test_hl$HeatingLoad, pred_gam_hl, "GAM", "Heating Load")
-```
-The graph: The red dashed line is "perfect prediction." The dots sit right on top of it across the whole range, from low loads near 10 all the way up to 40, with only tiny scatter. That tightness is the picture-version of the 0.987 R²,the model is rarely wrong by muchand it's not systematically over or under-predicting anywhere.
-
-
-```{r gam-cl}
-gam_cl <- gam(
-  CoolingLoad ~
-    s(RelCompactness, k = 6) +
-    s(WallArea,       k = 6) +
-    s(RoofArea,       k = 3) +    # fixed: was k=6, RoofArea has only 4 unique values
-    factor(OverallHeight) +        # fixed: was s(k=4), binary variable
-    factor(GlazingArea) +          # fixed: was s(k=4), only 4 levels
-    factor(Orientation) +
-    factor(GlazingAreaDist),
-  data   = train_cl,
-  method = "REML"
-)
-summary(gam_cl)
-
-pred_gam_cl <- predict(gam_cl, newdata = test_cl)
-perf_gam_cl <- eval_metrics("GAM", test_cl$CoolingLoad, pred_gam_cl)
-print(perf_gam_cl)
-```
-```{r}
-ggplot(tibble(actual = test_cl$CoolingLoad, predicted = pred_gam_cl),
-       aes(x = actual, y = predicted)) +
-  geom_point(alpha = 0.4, color = "darkorange") +
-  geom_abline(slope = 1, intercept = 0, color = "red",
-              linetype = "dashed", linewidth = 1) +
-  annotate("text", x = -Inf, y = Inf, hjust = -0.1, vjust = 1.5,
-           label = sprintf("RMSE = %.3f\nR² = %.3f",
-                           perf_gam_cl$RMSE, perf_gam_cl$R2)) +
-  labs(title = "GAM – Predicted vs Actual",
-       subtitle = "Cooling Load", x = "Actual", y = "Predicted") +
-  theme_minimal(base_size = 11)
-```
-```{r}
-par(mfrow = c(1, 3))
-plot(gam_cl, shade = TRUE, shade.col = "orange",
-     residuals = TRUE, pch = 1, cex = 0.3,
-     seWithMean = TRUE)
-par(mfrow = c(1, 1))
-```
-
-## B2. Regression Splines (Natural Splines via `lm`)
-
-Natural cubic splines with 4 knots provide a computationally lighter
-semi-parametric alternative to GAM.
-
-```{r ns-hl}
-ns_hl <- lm(
-  HeatingLoad ~
-    ns(RelCompactness, df = 4) +
-    ns(WallArea,       df = 4) +
-    ns(RoofArea,       df = 4) +
-    ns(OverallHeight,  df = 3) +
-    ns(GlazingArea,    df = 3) +
-    Orientation + GlazingAreaDist,
-  data = train_hl
-)
-summary(ns_hl)
-
-pred_ns_hl <- predict(ns_hl, newdata = test_hl)
-perf_ns_hl <- eval_metrics("Natural Splines", test_hl$HeatingLoad, pred_ns_hl)
-print(perf_ns_hl)
-```
-Heating Load (RMSE = 1.15, R² = 0.987): The natural-splines model explains about 99% of the variation and ties your GAM as the best heating-load fit. By letting RelCompactness, WallArea and GlazingArea bend instead of forcing straight lines, it captures the non-linear relationships that OLS missed
-
-
-```{r ns-cl}
-ns_cl <- lm(
-  CoolingLoad ~
-    ns(RelCompactness, df = 4) +
-    ns(WallArea,       df = 4) +
-    ns(RoofArea,       df = 2) +   # fixed: only 4 unique values
-    factor(OverallHeight) +        # fixed: binary, can't spline 2 points
-    ns(GlazingArea,    df = 3) +
-    Orientation + GlazingAreaDist,
-  data = train_cl
-)
-summary(ns_cl)
-
-pred_ns_cl <- predict(ns_cl, newdata = test_cl)
-perf_ns_cl <- eval_metrics("Natural Splines", test_cl$CoolingLoad, pred_ns_cl)
-print(perf_ns_cl)
-```
-
-```{r ns-cl}
-ns_cl <- lm(
-  CoolingLoad ~
-    ns(RelCompactness, df = 4) +
-    ns(WallArea,       df = 4) +
-    ns(RoofArea,       df = 4) +
-    ns(OverallHeight,  df = 3) +
-    ns(GlazingArea,    df = 3) +
-    Orientation + GlazingAreaDist,
-  data = train_cl
-)
-
-pred_ns_cl <- predict(ns_cl, newdata = test_cl)
-perf_ns_cl <- eval_metrics("Natural Splines", test_cl$CoolingLoad, pred_ns_cl)
-print(as.data.frame(perf_ns_cl))
-```
-
-
-# Part C: Non-Linear / Machine Learning Models
-
-## C1. Random Forest
-
-```{r rf-hl}
-set.seed(42)
-rf_hl <- train(
-  HeatingLoad ~ RelCompactness + WallArea + RoofArea + OverallHeight +
-    Orientation + GlazingArea + GlazingAreaDist +
-    CompactnessXHeight + WallToRoofRatio + GlazingXCompactness,
-  data      = train_hl,
-  method    = "rf",
-  trControl = cv_ctrl,
-  tuneGrid  = expand.grid(mtry = c(2, 3, 4, 5, 6)),
-  importance = TRUE
-)
-
-print(rf_hl)
-plot(rf_hl, main = "Random Forest-mtry Tuning (Heating Load)")
-
-pred_rf_hl <- predict(rf_hl, newdata = test_hl)
-perf_rf_hl <- eval_metrics("Random Forest", test_hl$HeatingLoad, pred_rf_hl)
-print(perf_rf_hl)
-```
-mtry - at each split in each tree, a random forest only considers a random subset of predictors rather than all of them.
-The tuning table: Reading down the RMSE column, error falls from 0.839 (mtry = 2) to its minimum at mtry = 5 (0.542), then ticks up very slightly at 6. That's why the last line states the model selected mtry = 5 — smallest RMSE wins. Rsquared climbs alongside (0.993 → 0.997) and MAE follows the same pattern, so all three metrics agree on mtry = 5 being best. These are cross-validation numbers measured on the training folds, so they describe how well the model generalises within the training data.
-
-This is the hyperparameter tuning plot for your random forest,it shows how the model's error changes as you vary mtry, and how caret picked the best value.
-
-
-```{r rf-hl-importance}
-# Variable importance
-vip::vip(rf_hl, num_features = 10,
-         aesthetics = list(fill = "steelblue")) +
-  ggtitle("Variable Importance-Random Forest (Heating Load)")
-```
-
-
-```{r rf-cl}
-set.seed(42)
-rf_cl <- train(
-  CoolingLoad ~ RelCompactness + WallArea + RoofArea + OverallHeight +
-    Orientation + GlazingArea + GlazingAreaDist +
-    CompactnessXHeight + WallToRoofRatio + GlazingXCompactness,
-  data      = train_cl,
-  method    = "rf",
-  trControl = cv_ctrl,
-  tuneGrid  = expand.grid(mtry = c(2, 3, 4, 5, 6)),
-  importance = TRUE
-)
-
-pred_rf_cl <- predict(rf_cl, newdata = test_cl)
-perf_rf_cl <- eval_metrics("Random Forest", test_cl$CoolingLoad, pred_rf_cl)
-knitr::kable(perf_rf_cl, digits = 3)
-
-vip::vip(rf_cl, num_features = 10,
-         aesthetics = list(fill = "darkorange")) +
-  ggtitle("Variable Importance-Random Forest (Cooling Load)")
-```
-
----
-
-## C2. Gradient Boosting (XGBoost)
-
-```{r xgb-hl}
-library(xgboost)
-
-X_train_xgb_hl <- as.matrix(dplyr::select(train_hl, -HeatingLoad, -CoolingLoad))
-X_test_xgb_hl  <- as.matrix(dplyr::select(test_hl,  -HeatingLoad, -CoolingLoad))
-
-dtrain_hl <- xgb.DMatrix(data = X_train_xgb_hl, label = train_hl$HeatingLoad)
-dtest_hl  <- xgb.DMatrix(data = X_test_xgb_hl)
-
-set.seed(42)
-xgb_hl <- xgb.train(
-  params = list(
-    objective = "reg:squarederror",
-    max_depth = 5,
-    eta       = 0.1,
-    subsample = 0.8,
-    colsample_bytree = 0.8,
-    verbosity = 0
-  ),
-  data    = dtrain_hl,
-  nrounds = 200
-)
-
-pred_xgb_hl <- predict(xgb_hl, dtest_hl)
-perf_xgb_hl <- eval_metrics("XGBoost", test_hl$HeatingLoad, pred_xgb_hl)
-print(as.data.frame(perf_xgb_hl))
-```
-
-```{r xgb-hl-importance}
-vip::vip(xgb_hl, num_features = 10,
-         aesthetics = list(fill = "mediumseagreen")) +
-  ggtitle("Variable Importance XGBoost (Heating Load)")
-```
-
-```{r xgb-cl}
-library(xgboost)
-
-X_train_xgb_cl <- as.matrix(dplyr::select(train_cl, -HeatingLoad, -CoolingLoad))
-X_test_xgb_cl  <- as.matrix(dplyr::select(test_cl,  -HeatingLoad, -CoolingLoad))
-
-dtrain_cl <- xgb.DMatrix(data = X_train_xgb_cl, label = train_cl$CoolingLoad)
-dtest_cl  <- xgb.DMatrix(data = X_test_xgb_cl)
-
-set.seed(42)
-xgb_cl <- xgb.train(
-  params = list(
-    objective        = "reg:squarederror",
-    max_depth        = 5,
-    eta              = 0.1,
-    subsample        = 0.8,
-    colsample_bytree = 0.8,
-    verbosity        = 0
-  ),
-  data    = dtrain_cl,
-  nrounds = 200
-)
-
-pred_xgb_cl <- predict(xgb_cl, dtest_cl)
-perf_xgb_cl <- eval_metrics("XGBoost", test_cl$CoolingLoad, pred_xgb_cl)
-print(as.data.frame(perf_xgb_cl))
-
-```
-```{r}
-# Convert test_cl to the same matrix format used during training
-X_test_xgb_cl <- as.matrix(dplyr::select(test_cl, -HeatingLoad, -CoolingLoad))
-dtest_cl      <- xgb.DMatrix(data = X_test_xgb_cl)
-
-pred_xgb_cl <- predict(xgb_cl, dtest_cl)
-perf_xgb_cl <- eval_metrics("XGBoost", test_cl$CoolingLoad, pred_xgb_cl)
-print(as.data.frame(perf_xgb_cl))
-```
-
-
-## C3. Support Vector Regression (SVR)
-
-```{r svr-hl}
-set.seed(42)
-svr_hl <- train(
-  HeatingLoad ~ RelCompactness + WallArea + RoofArea + OverallHeight +
-    Orientation + GlazingArea + GlazingAreaDist +
-    CompactnessXHeight + WallToRoofRatio + GlazingXCompactness,
-  data      = train_hl,
-  method    = "svmRadial",
-  trControl = cv_ctrl,
-  tuneLength = 8,
-  preProcess = c("center", "scale")
-)
-
-print(svr_hl)
-
-pred_svr_hl <- predict(svr_hl, newdata = test_hl)
-perf_svr_hl <- eval_metrics("SVR", test_hl$HeatingLoad, pred_svr_hl)
-print(as.data.frame(perf_svr_hl))
-```
-
-```{r svr-cl}
-set.seed(42)
-svr_cl <- train(
-  CoolingLoad ~ RelCompactness + WallArea + RoofArea + OverallHeight +
-    Orientation + GlazingArea + GlazingAreaDist +
-    CompactnessXHeight + WallToRoofRatio + GlazingXCompactness,
-  data      = train_cl,
-  method    = "svmRadial",
-  trControl = cv_ctrl,
-  tuneLength = 8,
-  preProcess = c("center", "scale")
-)
-
-pred_svr_cl <- predict(svr_cl, newdata = test_cl)
-perf_svr_cl <- eval_metrics("SVR", test_cl$CoolingLoad, pred_svr_cl)
-print(as.data.frame(perf_svr_cl))
-```
-
-
-## C4. Neural Network (MLP via caret / nnet)
-
-```{r nnet-hl}
-set.seed(42)
-nnet_hl <- train(
-  HeatingLoad ~ RelCompactness + WallArea + RoofArea + OverallHeight +
-    Orientation + GlazingArea + GlazingAreaDist +
-    CompactnessXHeight + WallToRoofRatio + GlazingXCompactness,
-  data      = train_hl,
-  method    = "nnet",
-  trControl = cv_ctrl,
-  tuneGrid  = expand.grid(size = c(5, 10, 15, 20), decay = c(0, 0.001, 0.01, 0.1)),
-  preProcess = c("center", "scale"),
-  linout    = TRUE,
-  maxit     = 500,
-  trace     = FALSE
-)
-
-cat("Best MLP params (HL):\n")
-print(nnet_hl$bestTune)
-
-pred_nnet_hl <- predict(nnet_hl, newdata = test_hl)
-perf_nnet_hl <- eval_metrics("Neural Network", test_hl$HeatingLoad, pred_nnet_hl)
-print(as.data.frame(perf_nnet_hl))
-```
-
-```{r nnet-cl}
-set.seed(42)
-nnet_cl <- train(
-  CoolingLoad ~ RelCompactness + WallArea + RoofArea + OverallHeight +
-    Orientation + GlazingArea + GlazingAreaDist +
-    CompactnessXHeight + WallToRoofRatio + GlazingXCompactness,
-  data      = train_cl,
-  method    = "nnet",
-  trControl = cv_ctrl,
-  tuneGrid  = expand.grid(size = c(5, 10, 15, 20), decay = c(0, 0.001, 0.01, 0.1)),
-  preProcess = c("center", "scale"),
-  linout    = TRUE,
-  maxit     = 500,
-  trace     = FALSE
-)
-
-pred_nnet_cl <- predict(nnet_cl, newdata = test_cl)
-perf_nnet_cl <- eval_metrics("Neural Network", test_cl$CoolingLoad, pred_nnet_cl)
-print(as.data.frame(perf_nnet_cl))
-```
-
 
 
 # Part D: Model Comparison
@@ -967,15 +594,13 @@ print(as.data.frame(perf_nnet_cl))
 
 ```{r perf-table}
 results_hl <- bind_rows(
-  perf_ols_hl, perf_ridge_hl, perf_lasso_hl, perf_enet_hl, perf_poly_hl,
-  perf_ns_hl, perf_gam_hl, perf_rf_hl, perf_xgb_hl, perf_svr_hl, perf_nnet_hl
+  perf_ols_hl, perf_ridge_hl, perf_lasso_hl, perf_enet_hl, perf_poly_hl
 ) %>%
   mutate(Response = "Heating Load") %>%
   arrange(RMSE)
 
 results_cl <- bind_rows(
-  perf_ols_cl, perf_ridge_cl, perf_lasso_cl, perf_enet_cl, perf_poly_cl,
-  perf_ns_cl, perf_gam_cl, perf_rf_cl, perf_xgb_cl, perf_svr_cl, perf_nnet_cl
+  perf_ols_cl, perf_ridge_cl, perf_lasso_cl, perf_enet_cl, perf_poly_cl
 ) %>%
   mutate(Response = "Cooling Load") %>%
   arrange(RMSE)
@@ -1003,6 +628,7 @@ ggplot(all_results, aes(x = reorder(Model, RMSE), y = RMSE, fill = Response)) +
        x = "Model", y = "RMSE") +
   theme_minimal(base_size = 12) +
   theme(legend.position = "top")
+ggsave("figures/model_comparison_rmse.png", width = 9, height = 6, dpi = 300)
 ```
 
 ## D3. Bar Chart: R² Comparison
@@ -1017,6 +643,7 @@ ggplot(all_results, aes(x = reorder(Model, R2), y = R2, fill = Response)) +
        x = "Model", y = "R²") +
   theme_minimal(base_size = 12) +
   theme(legend.position = "top")
+ggsave("figures/model_comparison_r2.png", width = 9, height = 6, dpi = 300)
 ```
 
 ## D4. Predicted vs Actual — Best Models
@@ -1030,12 +657,12 @@ cat("Best model (CL):", best_cl_name, "\n")
 
 # Predictions from all candidates — compiled for plotting
 preds_hl <- tibble(
-  Actual    = test_hl$HeatingLoad,
-  OLS       = pred_ols_hl,
-  GAM       = pred_gam_hl,
-  RandomForest = pred_rf_hl,
-  XGBoost   = pred_xgb_hl,
-  NeuralNet = pred_nnet_hl
+  Actual     = test_hl$HeatingLoad,
+  OLS        = pred_ols_hl,
+  Ridge      = as.vector(pred_ridge_hl),
+  LASSO      = as.vector(pred_lasso_hl),
+  ElasticNet = as.vector(pred_enet_hl),
+  Polynomial = pred_poly_hl
 ) %>% pivot_longer(-Actual, names_to = "Model", values_to = "Predicted")
 
 ggplot(preds_hl, aes(x = Actual, y = Predicted, color = Model)) +
@@ -1045,16 +672,17 @@ ggplot(preds_hl, aes(x = Actual, y = Predicted, color = Model)) +
   labs(title = "Predicted vs Actual — Heating Load", x = "Actual", y = "Predicted") +
   theme_minimal(base_size = 10) +
   theme(legend.position = "none")
+ggsave("figures/pred_vs_actual_hl.png", width = 9, height = 6, dpi = 300)
 ```
 
 ```{r best-models-scatter-cl}
 preds_cl <- tibble(
-  Actual    = test_cl$CoolingLoad,
-  OLS       = pred_ols_cl,
-  GAM       = pred_gam_cl,
-  RandomForest = pred_rf_cl,
-  XGBoost   = pred_xgb_cl,
-  NeuralNet = pred_nnet_cl
+  Actual     = test_cl$CoolingLoad,
+  OLS        = pred_ols_cl,
+  Ridge      = as.vector(pred_ridge_cl),
+  LASSO      = as.vector(pred_lasso_cl),
+  ElasticNet = as.vector(pred_enet_cl),
+  Polynomial = pred_poly_cl
 ) %>% pivot_longer(-Actual, names_to = "Model", values_to = "Predicted")
 
 ggplot(preds_cl, aes(x = Actual, y = Predicted, color = Model)) +
@@ -1064,53 +692,14 @@ ggplot(preds_cl, aes(x = Actual, y = Predicted, color = Model)) +
   labs(title = "Predicted vs Actual — Cooling Load", x = "Actual", y = "Predicted") +
   theme_minimal(base_size = 10) +
   theme(legend.position = "none")
+ggsave("figures/pred_vs_actual_cl.png", width = 9, height = 6, dpi = 300)
 ```
 
 ---
 
 # Part E: Feature Importance Synthesis
 
-## E1. Cross-Model Variable Importance
-
-```{r feature-importance-synthesis}
-# RF importance (via caret varImp — works fine)
-rf_imp_hl <- varImp(rf_hl)$importance %>%
-  rownames_to_column("Feature") %>%
-  rename(Importance = Overall) %>%
-  mutate(Model = "RandomForest_HL")
-
-rf_imp_cl <- varImp(rf_cl)$importance %>%
-  rownames_to_column("Feature") %>%
-  rename(Importance = Overall) %>%
-  mutate(Model = "RandomForest_CL")
-
-# XGB importance — use xgb.importance() for raw xgb.Booster objects
-xgb_imp_hl <- xgb.importance(model = xgb_hl) %>%
-  as.data.frame() %>%
-  dplyr::select(Feature, Gain) %>%
-  rename(Importance = Gain) %>%
-  mutate(Model = "XGBoost_HL")
-
-xgb_imp_cl <- xgb.importance(model = xgb_cl) %>%
-  as.data.frame() %>%
-  dplyr::select(Feature, Gain) %>%
-  rename(Importance = Gain) %>%
-  mutate(Model = "XGBoost_CL")
-
-imp_combined <- bind_rows(rf_imp_hl, rf_imp_cl, xgb_imp_hl, xgb_imp_cl)
-
-ggplot(imp_combined %>% filter(Importance > 0),
-       aes(x = reorder(Feature, Importance), y = Importance, fill = Model)) +
-  geom_col(position = "dodge", alpha = 0.85) +
-  coord_flip() +
-  facet_wrap(~Model, scales = "free_x", ncol = 2) +
-  labs(title = "Variable Importance — RF & XGBoost (HL & CL)",
-       x = "Feature", y = "Importance") +
-  theme_minimal(base_size = 10) +
-  theme(legend.position = "none")
-```
-
-## E2. OLS Coefficient Plot
+## E1. OLS Coefficient Plot
 
 ```{r coef-plot}
 coef_df <- broom::tidy(ols_hl, conf.int = TRUE) %>%
@@ -1124,6 +713,7 @@ ggplot(coef_df, aes(x = reorder(term, estimate), y = estimate,
   labs(title = "OLS Coefficients with 95% CI-Heating Load",
        x = "Predictor", y = "Coefficient Estimate") +
   theme_minimal()
+ggsave("figures/ols_coefficients_hl.png", width = 8, height = 6, dpi = 300)
 ```
 
 ---
@@ -1131,35 +721,37 @@ ggplot(coef_df, aes(x = reorder(term, estimate), y = estimate,
 # Part F: Residual Analysis — Best Models
 
 ```{r resid-best-hl}
-# Residuals for the top-performing non-linear model (XGBoost as expected)
-resid_xgb_hl <- test_hl$HeatingLoad - pred_xgb_hl
+# Residuals for the best parametric model (Polynomial regression)
+resid_poly_hl <- test_hl$HeatingLoad - pred_poly_hl
 
 par(mfrow = c(1, 2))
-qqnorm(resid_xgb_hl, main = "Q-Q: XGBoost Residuals (Heating Load)",
+qqnorm(resid_poly_hl, main = "Q-Q: Polynomial Residuals (Heating Load)",
        col = adjustcolor("steelblue", 0.6), pch = 16)
-qqline(resid_xgb_hl, col = "red", lwd = 2)
+qqline(resid_poly_hl, col = "red", lwd = 2)
 
-hist(resid_xgb_hl, breaks = 30, col = "lightblue", border = "white",
-     main = "Residual Histogram – XGBoost (HL)",
+hist(resid_poly_hl, breaks = 30, col = "lightblue", border = "white",
+     main = "Residual Histogram – Polynomial (HL)",
      xlab = "Residuals", probability = TRUE)
-curve(dnorm(x, mean(resid_xgb_hl), sd(resid_xgb_hl)),
+curve(dnorm(x, mean(resid_poly_hl), sd(resid_poly_hl)),
       add = TRUE, col = "red", lwd = 2)
+dev.print(png, "figures/residuals_poly_hl.png", width = 1100, height = 550, res = 120)
 par(mfrow = c(1, 1))
 ```
 
 ```{r resid-best-cl}
-resid_xgb_cl <- test_cl$CoolingLoad - pred_xgb_cl
+resid_poly_cl <- test_cl$CoolingLoad - pred_poly_cl
 
 par(mfrow = c(1, 2))
-qqnorm(resid_xgb_cl, main = "Q-Q: XGBoost Residuals (Cooling Load)",
+qqnorm(resid_poly_cl, main = "Q-Q: Polynomial Residuals (Cooling Load)",
        col = adjustcolor("darkorange", 0.6), pch = 16)
-qqline(resid_xgb_cl, col = "red", lwd = 2)
+qqline(resid_poly_cl, col = "red", lwd = 2)
 
-hist(resid_xgb_cl, breaks = 30, col = "moccasin", border = "white",
-     main = "Residual Histogram – XGBoost (CL)",
+hist(resid_poly_cl, breaks = 30, col = "moccasin", border = "white",
+     main = "Residual Histogram – Polynomial (CL)",
      xlab = "Residuals", probability = TRUE)
-curve(dnorm(x, mean(resid_xgb_cl), sd(resid_xgb_cl)),
+curve(dnorm(x, mean(resid_poly_cl), sd(resid_poly_cl)),
       add = TRUE, col = "red", lwd = 2)
+dev.print(png, "figures/residuals_poly_cl.png", width = 1100, height = 550, res = 120)
 par(mfrow = c(1, 1))
 ```
 
