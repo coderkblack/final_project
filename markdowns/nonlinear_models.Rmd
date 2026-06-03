@@ -11,6 +11,7 @@ output:
   pdf_document:
     toc: true
 ---
+
 ```{r packages}
 pkgs <- c("tidyverse", "caret", "randomForest", "xgboost", "nnet",
           "mgcv", "splines", "corrplot", "ggplot2", "dplyr",
@@ -18,11 +19,18 @@ pkgs <- c("tidyverse", "caret", "randomForest", "xgboost", "nnet",
 
 lapply(pkgs, library, character.only = TRUE)
 ```
+
+```{r setup-image-dir}
+img_dir <- "/home/jakes/Documents/strathmore/Modules/Module 3/linear_models/classwork/final_project/markdowns/images"
+dir.create(img_dir, showWarnings = FALSE, recursive = TRUE)
+```
+
 # Load Data from EDA Output
 
 We load the post-EDA Excel file produced at the end of `EDA.Rmd`.
 This file already has renamed columns, factor variants (`_f`), and
 an `is_outlier` flag column.
+
 ```{r}
 df <- read_excel("~/Documents/strathmore/Modules/Module 3/linear_models/classwork/final_project/markdowns/new_data/ENB2012_post_EDA.xlsx")
 ```
@@ -89,6 +97,7 @@ df %>%
   dplyr::select(RelCompactness:CoolingLoad) %>%
   summary()
 ```
+
 Since there are no outliers, we keep the data as it is.
 
 # Response Variable Transformation
@@ -96,6 +105,7 @@ Since there are no outliers, we keep the data as it is.
 ## Visual check: raw vs log
 
 ```{r log-check}
+png(file.path(img_dir, "response_raw_vs_log.png"), width = 1200, height = 900, res = 150)
 par(mfrow = c(2, 2))
 
 hist(df$HeatingLoad,      breaks = 30, col = "lightblue",
@@ -109,6 +119,19 @@ hist(log(df$CoolingLoad), breaks = 30, col = "lightgreen",
      main = "log(Y2): Cooling Load",  xlab = "log(CoolingLoad)")
 
 par(mfrow = c(1, 1))
+dev.off()
+
+# Render inline as well
+par(mfrow = c(2, 2))
+hist(df$HeatingLoad,      breaks = 30, col = "lightblue",
+     main = "Y1: Heating Load (raw)", xlab = "HeatingLoad")
+hist(log(df$HeatingLoad), breaks = 30, col = "lightgreen",
+     main = "log(Y1): Heating Load",  xlab = "log(HeatingLoad)")
+hist(df$CoolingLoad,      breaks = 30, col = "lightblue",
+     main = "Y2: Cooling Load (raw)", xlab = "CoolingLoad")
+hist(log(df$CoolingLoad), breaks = 30, col = "lightgreen",
+     main = "log(Y2): Cooling Load",  xlab = "log(CoolingLoad)")
+par(mfrow = c(1, 1))
 ```
 
 # Multicollinearity & VIF Review
@@ -116,6 +139,7 @@ par(mfrow = c(1, 1))
 SurfaceArea was found in EDA to be perfectly collinear with
 WallArea + RoofArea. We drop it from the modelling set and confirm
 VIF scores are acceptable for the remaining predictors.
+
 ```{r vif}
 vif_model <- lm(
   HeatingLoad ~ RelCompactness + WallArea + RoofArea +
@@ -134,14 +158,14 @@ vif_table <- data.frame(
 
 print(vif_table)
 ```
-We will keep them all, and accept the VIF. This is because Random Forest, XGBoost, and GAMs are not affected by multicollinearity at all. High VIF only damages OLS coefficient interpretation, not prediction accuracy.
 
+We will keep them all, and accept the VIF. This is because Random Forest, XGBoost, and GAMs are not affected by multicollinearity at all. High VIF only damages OLS coefficient interpretation, not prediction accuracy.
 
 # Polynomial Relationship Check (all predictors)
 
-We extend the single-predictor check from to
-cover all continuous predictors against both outcomes, so we know
-which quadratic terms are worth including as engineered features.
+We extend the single-predictor check to cover all continuous predictors against
+both outcomes, so we know which quadratic terms are worth including as engineered
+features.
 
 ```{r poly-check, fig.height=10}
 cont_preds <- c("RelCompactness", "WallArea", "RoofArea",
@@ -166,14 +190,17 @@ make_poly_plots <- function(response_var, point_col) {
 }
 
 p_y1 <- make_poly_plots("HeatingLoad", "steelblue")
-do.call(gridExtra::grid.arrange, c(p_y1, ncol = 3,
+poly_y1_plot <- do.call(gridExtra::grid.arrange, c(p_y1, ncol = 3,
   list(top = "Polynomial check — Heating Load (Y1)")))
+ggsave(file.path(img_dir, "poly_check_heating_load.png"),
+       plot = poly_y1_plot, width = 14, height = 10, dpi = 150)
 
 p_y2 <- make_poly_plots("CoolingLoad", "darkorange")
-do.call(gridExtra::grid.arrange, c(p_y2, ncol = 3,
+poly_y2_plot <- do.call(gridExtra::grid.arrange, c(p_y2, ncol = 3,
   list(top = "Polynomial check — Cooling Load (Y2)")))
+ggsave(file.path(img_dir, "poly_check_cooling_load.png"),
+       plot = poly_y2_plot, width = 14, height = 10, dpi = 150)
 ```
-
 
 # Feature Engineering
 
@@ -223,6 +250,7 @@ cat(paste(" -",
     "CompactnessSquared","HeightSquared","GlazingToWall",
     "EnvelopeArea","WallPerHeight")), sep = "\n")
 ```
+
 ```{r}
 library(car)
 candidate_features_clean3 <- c(
@@ -240,6 +268,7 @@ vif_model_y2d <- lm(
 vif_values <- vif(vif_model_y2d)
 print(sort(vif_values, decreasing = TRUE))
 ```
+
 ```{r}
 candidate_features_final <- c(
   "CompactnessSquared",  # captures nonlinear compactness effect
@@ -277,6 +306,10 @@ y_test  <- df_clean$CoolingLoad[-train_idx]
 
 # Cross-validated Elastic Net
 cv_fit_y2 <- cv.glmnet(X_train, y_train, alpha = 0.5, nfolds = 10)
+
+png(file.path(img_dir, "elastic_net_cv_preliminary.png"), width = 900, height = 700, res = 150)
+plot(cv_fit_y2)
+dev.off()
 plot(cv_fit_y2)
 
 # Best lambda
@@ -319,7 +352,7 @@ cor_eng <- df_clean %>%
 
 # Show only correlations with the two outcomes
 cor_with_outcomes <- data.frame(
-  Feature        = eng_features,
+  Feature         = eng_features,
   Cor_HeatingLoad = round(cor_eng[eng_features, "HeatingLoad"], 3),
   Cor_CoolingLoad = round(cor_eng[eng_features, "CoolingLoad"], 3)
 ) %>%
@@ -327,10 +360,10 @@ cor_with_outcomes <- data.frame(
 
 print(cor_with_outcomes)
 ```
+
 The top three features, SurfToVol, WallToRoofRatio, and CompactnessXHeight, act as the primary drivers, all demonstrating high-impact correlations exceeding 0.80 for both heating and cooling outcomes. The consistent magnitude across both targets implies that these predictors capture fundamental geometric properties that affect thermal efficiency regardless of whether the goal is heating or cooling.
 
 The mid-tier group, led by WallPerHeight and GlazingXHeight, provides secondary stability with correlations in the 0.60–0.70 range, ensuring the model incorporates localized architectural details beyond raw proportions. Meanwhile, the lower-tier features like EnvelopeArea and GlazingToWall show notably weaker or negligible associations, suggesting they contribute minimal signal and might be candidates for dimensionality reduction or pruning. Overall, the model benefits from a "distributed load" of information rather than relying on a single, isolated variable, which typically improves generalization.
-
 
 # Train / Test Split
 
@@ -371,8 +404,6 @@ eval_reg <- function(actual, predicted, model_name) {
 
 results_y1 <- data.frame()
 ```
-
-
 
 # Feature Scaling (Centre + Scale)
 
@@ -415,8 +446,6 @@ print(train_stats[, 1:6])
 
 Here, we cover the more flexible end of the modelling spectrum. Unlike the purely parametric models, the methods here either relax or abandon the assumption of a fixed functional form. Some, like the Generalised Additive Model, remain partially interpretable by estimating smooth functions of individual predictors. Others, like Random Forest and XGBoost, treat the data as a pattern recognition problem and make no assumptions about the shape of the relationships at all. The tradeoff is that flexibility typically comes at the cost of some interpretability, though variable importance measures go some way towards compensating for this. All models are evaluated on the same held-out test set used in the regression file so that the results are directly comparable.
 
-
-
 ## Y1 — Heating Load
 
 The nonlinear models are applied first to heating load. Given the physical nature of building thermodynamics, there is good reason to expect some of the relationships between the building features and energy demand to be genuinely nonlinear, which makes this family of models a natural fit for the problem.
@@ -443,16 +472,27 @@ for (col in c("RoofArea", "GlazingArea", "GlazingAreaDist",
 
 gam_y1 <- gam(
   HeatingLoad ~
-    s(SurfToVol, k = 10) +        # Replaces raw WallArea/RoofArea/Compactness
-    s(CompactnessXHeight, k = 8) + 
+    s(SurfToVol, k = 10) +
+    s(CompactnessXHeight, k = 8) +
     s(GlazingXHeight, k = 6) +
-    Orientation,         
-  data = gam_train,
+    Orientation,
+  data   = gam_train,
   method = "REML"
 )
 
 summary(gam_y1)
+
+# Save GAM smooth effect plots
+png(file.path(img_dir, "gam_y1_smooth_effects.png"), width = 1200, height = 900, res = 150)
+plot(gam_y1, pages = 1, shade = TRUE, shade.col = "lightblue",
+     main = "GAM Smooth Effects — Heating Load (Y1)")
+dev.off()
 plot(gam_y1, pages = 1, shade = TRUE, shade.col = "lightblue")
+
+# Save gam.check diagnostics
+png(file.path(img_dir, "gam_y1_diagnostics.png"), width = 1200, height = 900, res = 150)
+gam.check(gam_y1)
+dev.off()
 gam.check(gam_y1)
 
 pred_gam_y1 <- predict(gam_y1, newdata = gam_test)
@@ -486,8 +526,36 @@ mars_y1 <- earth(
 )
 
 summary(mars_y1)
+
+# Save plotmo response curves
+png(file.path(img_dir, "mars_y1_response_curves.png"), width = 1400, height = 1000, res = 150)
+plotmo(mars_y1, main = "MARS Response Curves — Heating Load (Y1)")
+dev.off()
 plotmo(mars_y1)
-evimp(mars_y1)
+
+# Save variable importance (evimp)
+mars_y1_imp <- evimp(mars_y1)
+print(mars_y1_imp)
+
+# evimp() returns a matrix whose column count can vary by earth version.
+# Use column index 1 (nsubsets) rather than names to stay version-safe.
+mars_imp_df <- data.frame(
+  Feature  = rownames(mars_y1_imp),
+  nsubsets = mars_y1_imp[, 1],
+  stringsAsFactors = FALSE
+) %>%
+  arrange(desc(nsubsets))
+
+p_mars_y1_imp <- ggplot(mars_imp_df, aes(x = reorder(Feature, nsubsets), y = nsubsets)) +
+  geom_col(fill = "steelblue", alpha = 0.8) +
+  geom_text(aes(label = nsubsets), hjust = -0.2, size = 3) +
+  coord_flip() +
+  labs(title = "MARS Variable Importance — Heating Load (Y1)",
+       x = "Feature", y = "Number of Model Subsets") +
+  theme_minimal()
+ggsave(file.path(img_dir, "mars_y1_variable_importance.png"),
+       plot = p_mars_y1_imp, width = 10, height = 7, dpi = 150)
+print(p_mars_y1_imp)
 
 pred_mars_y1 <- predict(mars_y1, newdata = df_test)
 results_y1   <- rbind(results_y1,
@@ -511,17 +579,50 @@ features <- c(
   "CompactnessSquared", "GlazingToWall", "EnvelopeArea", "WallPerHeight"
 )
 
-tree_y1 <- rpart(HeatingLoad ~ ., data = df_train[, c(features, "HeatingLoad")],
+tree_y1 <- rpart(HeatingLoad ~ .,
+                 data    = df_train[, c(features, "HeatingLoad")],
                  control = rpart.control(cp = 0.01))
+
+# Save full tree plot
+png(file.path(img_dir, "tree_y1_full.png"), width = 1400, height = 900, res = 150)
 rpart.plot(tree_y1, main = "Regression Tree — Heating Load", roundint = FALSE)
+dev.off()
+rpart.plot(tree_y1, main = "Regression Tree — Heating Load", roundint = FALSE)
+
 printcp(tree_y1)
 
 optimal_cp <- tree_y1$cptable[which.min(tree_y1$cptable[, "xerror"]), "CP"]
 tree_y1_pruned <- prune(tree_y1, cp = optimal_cp)
+
+# Save pruned tree plot
+png(file.path(img_dir, "tree_y1_pruned.png"), width = 1400, height = 900, res = 150)
+rpart.plot(tree_y1_pruned, main = "Pruned Regression Tree — Heating Load", roundint = FALSE)
+dev.off()
 rpart.plot(tree_y1_pruned, main = "Pruned Regression Tree — Heating Load", roundint = FALSE)
 
+# Variable importance from rpart
+tree_y1_imp <- tree_y1_pruned$variable.importance
+if (!is.null(tree_y1_imp) && length(tree_y1_imp) > 0) {
+  tree_imp_df <- data.frame(
+    Feature    = names(tree_y1_imp),
+    Importance = as.numeric(tree_y1_imp)
+  ) %>% arrange(desc(Importance))
+
+  p_tree_y1_imp <- ggplot(tree_imp_df, aes(x = reorder(Feature, Importance), y = Importance)) +
+    geom_col(fill = "steelblue", alpha = 0.8) +
+    geom_text(aes(label = round(Importance, 1)), hjust = -0.2, size = 3) +
+    coord_flip() +
+    labs(title = "Regression Tree Variable Importance — Heating Load (Y1)",
+         x = "Feature", y = "Importance") +
+    theme_minimal()
+  ggsave(file.path(img_dir, "tree_y1_variable_importance.png"),
+         plot = p_tree_y1_imp, width = 10, height = 7, dpi = 150)
+  print(p_tree_y1_imp)
+}
+
 pred_tree_y1 <- predict(tree_y1_pruned, newdata = df_test)
-results_y1 <- rbind(results_y1, eval_reg(df_test$HeatingLoad, pred_tree_y1, "Regression Tree"))
+results_y1 <- rbind(results_y1,
+  eval_reg(df_test$HeatingLoad, pred_tree_y1, "Regression Tree"))
 ```
 
 ### Model 10 — Random Forest
@@ -539,15 +640,26 @@ features <- c(
   "SurfToVol", "GlazingXHeight", "WallXGlazing",
   "CompactnessSquared", "GlazingToWall", "EnvelopeArea", "WallPerHeight"
 )
+
 set.seed(42)
-rf_y1 <- randomForest(HeatingLoad ~ ., data = df_train[, c(features, "HeatingLoad")],
-                       ntree = 500, mtry = 3, importance = TRUE)
+rf_y1 <- randomForest(HeatingLoad ~ .,
+                      data      = df_train[, c(features, "HeatingLoad")],
+                      ntree     = 500,
+                      mtry      = 3,
+                      importance = TRUE)
 print(rf_y1)
-varImpPlot(rf_y1, main = "Random Forest Variable Importance — Y1")
+
+# Save variable importance plot
+png(file.path(img_dir, "rf_y1_variable_importance.png"), width = 1200, height = 900, res = 150)
+varImpPlot(rf_y1, main = "Random Forest Variable Importance — Heating Load (Y1)")
+dev.off()
+varImpPlot(rf_y1, main = "Random Forest Variable Importance — Heating Load (Y1)")
+
 importance(rf_y1)
 
 pred_rf_y1 <- predict(rf_y1, newdata = df_test)
-results_y1 <- rbind(results_y1, eval_reg(df_test$HeatingLoad, pred_rf_y1, "Random Forest"))
+results_y1 <- rbind(results_y1,
+  eval_reg(df_test$HeatingLoad, pred_rf_y1, "Random Forest"))
 ```
 
 ### Model 11 — XGBoost
@@ -568,9 +680,11 @@ features <- c(
   "CompactnessSquared", "GlazingToWall", "EnvelopeArea", "WallPerHeight"
 )
 
-x_train <- model.matrix(HeatingLoad ~ ., data = df_train[, c(features, "HeatingLoad")])[, -1]
+x_train <- model.matrix(HeatingLoad ~ .,
+              data = df_train[, c(features, "HeatingLoad")])[, -1]
 y_train  <- df_train$HeatingLoad
-x_test   <- model.matrix(HeatingLoad ~ ., data = df_test[, c(features, "HeatingLoad")])[, -1]
+x_test   <- model.matrix(HeatingLoad ~ .,
+              data = df_test[, c(features, "HeatingLoad")])[, -1]
 
 dtrain_y1 <- xgb.DMatrix(data = x_train, label = y_train)
 dtest_y1  <- xgb.DMatrix(data = x_test,  label = df_test$HeatingLoad)
@@ -583,15 +697,26 @@ params_y1 <- list(
   colsample_bytree = 0.8
 )
 
-xgb_y1 <- xgb.train(params = params_y1, data = dtrain_y1, nrounds = 200,
-                     watchlist = list(train = dtrain_y1, test = dtest_y1),
-                     verbose = 0, early_stopping_rounds = 20)
+xgb_y1 <- xgb.train(
+  params               = params_y1,
+  data                 = dtrain_y1,
+  nrounds              = 200,
+  watchlist            = list(train = dtrain_y1, test = dtest_y1),
+  verbose              = 0,
+  early_stopping_rounds = 20
+)
 
 xgb_imp_y1 <- xgb.importance(model = xgb_y1)
-xgb.plot.importance(xgb_imp_y1, top_n = 8, main = "XGBoost Feature Importance — Y1")
+
+# Save XGBoost feature importance plot
+png(file.path(img_dir, "xgb_y1_feature_importance.png"), width = 1200, height = 900, res = 150)
+xgb.plot.importance(xgb_imp_y1, top_n = 8, main = "XGBoost Feature Importance — Heating Load (Y1)")
+dev.off()
+xgb.plot.importance(xgb_imp_y1, top_n = 8, main = "XGBoost Feature Importance — Heating Load (Y1)")
 
 pred_xgb_y1 <- predict(xgb_y1, newdata = dtest_y1)
-results_y1 <- rbind(results_y1, eval_reg(df_test$HeatingLoad, pred_xgb_y1, "XGBoost"))
+results_y1 <- rbind(results_y1,
+  eval_reg(df_test$HeatingLoad, pred_xgb_y1, "XGBoost"))
 ```
 
 ### Model 12 — SVM Regression
@@ -610,12 +735,18 @@ features <- c(
   "SurfToVol", "GlazingXHeight", "WallXGlazing",
   "CompactnessSquared", "GlazingToWall", "EnvelopeArea", "WallPerHeight"
 )
-svm_y1 <- svm(HeatingLoad ~ ., data = df_train[, c(features, "HeatingLoad")],
-              type = "eps-regression", kernel = "radial", cost = 10, epsilon = 0.1)
+
+svm_y1 <- svm(HeatingLoad ~ .,
+              data    = df_train[, c(features, "HeatingLoad")],
+              type    = "eps-regression",
+              kernel  = "radial",
+              cost    = 10,
+              epsilon = 0.1)
 summary(svm_y1)
 
 pred_svm_y1 <- predict(svm_y1, newdata = df_test)
-results_y1 <- rbind(results_y1, eval_reg(df_test$HeatingLoad, pred_svm_y1, "SVM (RBF)"))
+results_y1 <- rbind(results_y1,
+  eval_reg(df_test$HeatingLoad, pred_svm_y1, "SVM (RBF)"))
 ```
 
 ### Model 13 — Neural Network
@@ -633,17 +764,23 @@ features <- c(
   "SurfToVol", "GlazingXHeight", "WallXGlazing",
   "CompactnessSquared", "GlazingToWall", "EnvelopeArea", "WallPerHeight"
 )
+
 preproc <- preProcess(df_train[, features], method = c("center", "scale"))
 train_scaled <- predict(preproc, df_train[, features])
 test_scaled  <- predict(preproc, df_test[, features])
 train_scaled$HeatingLoad <- df_train$HeatingLoad
 
 set.seed(42)
-nn_y1 <- nnet(HeatingLoad ~ ., data = train_scaled, size = 10,
-              linout = TRUE, maxit = 500, decay = 0.01, trace = FALSE)
+nn_y1 <- nnet(HeatingLoad ~ ., data = train_scaled,
+              size   = 10,
+              linout = TRUE,
+              maxit  = 500,
+              decay  = 0.01,
+              trace  = FALSE)
 
 pred_nn_y1 <- predict(nn_y1, newdata = test_scaled)
-results_y1 <- rbind(results_y1, eval_reg(df_test$HeatingLoad, pred_nn_y1, "Neural Network"))
+results_y1 <- rbind(results_y1,
+  eval_reg(df_test$HeatingLoad, pred_nn_y1, "Neural Network"))
 ```
 
 ### Model 14 — k-Nearest Neighbors
@@ -661,18 +798,27 @@ features <- c(
   "SurfToVol", "GlazingXHeight", "WallXGlazing",
   "CompactnessSquared", "GlazingToWall", "EnvelopeArea", "WallPerHeight"
 )
+
 set.seed(42)
 knn_ctrl <- trainControl(method = "cv", number = 10)
-knn_y1 <- train(HeatingLoad ~ ., data = df_train[, c(features, "HeatingLoad")],
-                method = "knn",
+knn_y1 <- train(HeatingLoad ~ .,
+                data      = df_train[, c(features, "HeatingLoad")],
+                method    = "knn",
                 preProcess = c("center", "scale"),
-                trControl = knn_ctrl,
-                tuneGrid = data.frame(k = c(3, 5, 7, 9, 11, 15)))
+                trControl  = knn_ctrl,
+                tuneGrid   = data.frame(k = c(3, 5, 7, 9, 11, 15)))
 print(knn_y1)
+
+# Save k-NN tuning curve
+p_knn_y1 <- plot(knn_y1)
+png(file.path(img_dir, "knn_y1_tuning_curve.png"), width = 900, height = 700, res = 150)
+print(plot(knn_y1, main = "k-NN CV Tuning — Heating Load (Y1)"))
+dev.off()
 plot(knn_y1)
 
 pred_knn_y1 <- predict(knn_y1, newdata = df_test)
-results_y1 <- rbind(results_y1, eval_reg(df_test$HeatingLoad, pred_knn_y1, "k-NN Regression"))
+results_y1 <- rbind(results_y1,
+  eval_reg(df_test$HeatingLoad, pred_knn_y1, "k-NN Regression"))
 ```
 
 ### Y1 — Model Comparison
@@ -687,46 +833,43 @@ results_y1 <- results_y1 %>% arrange(RMSE)
 cat("\n========== Y1: HEATING LOAD — SEMI-PARAMETRIC & NONLINEAR MODEL COMPARISON ==========\n")
 print(results_y1, row.names = FALSE)
 
-ggplot(results_y1, aes(x = reorder(Model, RMSE), y = RMSE)) +
+p_rmse_y1 <- ggplot(results_y1, aes(x = reorder(Model, RMSE), y = RMSE)) +
   geom_col(fill = "steelblue", alpha = 0.8) +
   geom_text(aes(label = round(RMSE, 3)), hjust = -0.1, size = 3) +
   coord_flip() +
   labs(title = "Semi-parametric & Nonlinear Model Comparison — Heating Load (Y1)",
        x = "Model", y = "RMSE (Test Set)") +
   theme_minimal()
+ggsave(file.path(img_dir, "comparison_y1_rmse.png"),
+       plot = p_rmse_y1, width = 10, height = 7, dpi = 150)
+print(p_rmse_y1)
 
-ggplot(results_y1, aes(x = reorder(Model, -R2), y = R2)) +
+p_r2_y1 <- ggplot(results_y1, aes(x = reorder(Model, -R2), y = R2)) +
   geom_col(fill = "darkgreen", alpha = 0.7) +
   geom_text(aes(label = round(R2, 4)), hjust = -0.1, size = 3) +
   coord_flip() +
   labs(title = "R² Comparison — Heating Load (Y1)",
        x = "Model", y = "R²") +
   theme_minimal()
+ggsave(file.path(img_dir, "comparison_y1_r2.png"),
+       plot = p_r2_y1, width = 10, height = 7, dpi = 150)
+print(p_r2_y1)
 ```
-
-
 
 ## Y2 — Cooling Load
 
 The same eight models are now applied to cooling load. Cooling load is generally considered a slightly harder prediction target because it depends more strongly on external conditions like solar gain and ambient temperature, factors that interact with building geometry in complex ways. Flexible models are therefore well positioned to capture these dynamics.
 
-### Model 7 — GAM
-
-The GAM for cooling load uses the same smooth term structure as the heating load model, with REML fitting to control smoothness. The partial effect plots produced by the model are particularly informative here because they show visually how each building characteristic influences cooling demand across its observed range.
-
 ```{r}
 results_y2 <- data.frame()
 ```
+
+### Elastic Net — Cooling Load (Y2)
 
 ```{r}
 # ============================================================
 # MODEL X — Elastic Net: CoolingLoad (Y2)
 # ============================================================
-# Three engineered features selected after VIF pruning.
-# Orientation is included as a numeric predictor since it is
-# already scaled above. GlazingArea main effect is subsumed
-# by GlazingXHeight but Orientation carries independent signal
-# not encoded in any engineered feature.
 library(car)
 elastic_features_y2 <- c(
   "CompactnessSquared",
@@ -747,35 +890,56 @@ cv_fit_y2 <- cv.glmnet(
   nfolds = 10
 )
 
+png(file.path(img_dir, "elastic_net_y2_cv.png"), width = 900, height = 700, res = 150)
+plot(cv_fit_y2, main = "Elastic Net CV — Cooling Load (Y2)")
+dev.off()
 plot(cv_fit_y2)
-cat("Best lambda (min):", cv_fit_y2$lambda.min, "\n")
 
+cat("Best lambda (min):", cv_fit_y2$lambda.min, "\n")
 cat("\nModel coefficients:\n")
 print(coef(cv_fit_y2, s = "lambda.min"))
 
 preds_y2 <- predict(cv_fit_y2, newx = X_test_en, s = "lambda.min")
 
-results_y2 <- data.frame()
 results_y2 <- rbind(results_y2,
-  eval_reg(y_test_y2, as.vector(preds_y2), "Elastic Net")
-)
+  eval_reg(y_test_y2, as.vector(preds_y2), "Elastic Net"))
 cat("\n--- Elastic Net: CoolingLoad Test Performance ---\n")
 print(results_y2)
 ```
 
+### Model 7 — GAM
+
+The GAM for cooling load uses the same smooth term structure as the heating load model, with REML fitting to control smoothness. The partial effect plots produced by the model are particularly informative here because they show visually how each building characteristic influences cooling demand across its observed range.
+
 ```{r}
 # --- 9.7  GAM ---
-# RoofArea and GlazingArea are factors (converted in the Y1 GAM section),
-# so they stay as parametric terms — s() cannot be applied to a factor variable.
-gam_y2 <- gam(CoolingLoad ~ s(RelCompactness, k = 12) + s(WallArea, k = 7) +
-                RoofArea + OverallHeight + Orientation +
-                GlazingArea + GlazingAreaDist,
-              data = df_train, method = "REML")
+gam_y2 <- gam(
+  CoolingLoad ~
+    s(RelCompactness, k = 12) +
+    s(WallArea, k = 7) +
+    RoofArea + OverallHeight + Orientation +
+    GlazingArea + GlazingAreaDist,
+  data   = df_train,
+  method = "REML"
+)
 summary(gam_y2)
+
+# Save GAM smooth effects
+png(file.path(img_dir, "gam_y2_smooth_effects.png"), width = 1200, height = 900, res = 150)
+plot(gam_y2, pages = 1, shade = TRUE, shade.col = "lightyellow",
+     main = "GAM Smooth Effects — Cooling Load (Y2)")
+dev.off()
 plot(gam_y2, pages = 1, shade = TRUE, shade.col = "lightyellow")
 
+# Save GAM diagnostics
+png(file.path(img_dir, "gam_y2_diagnostics.png"), width = 1200, height = 900, res = 150)
+gam.check(gam_y2)
+dev.off()
+gam.check(gam_y2)
+
 pred_gam_y2 <- predict(gam_y2, newdata = df_test)
-results_y2 <- rbind(results_y2, eval_reg(df_test$CoolingLoad, pred_gam_y2, "GAM"))
+results_y2 <- rbind(results_y2,
+  eval_reg(df_test$CoolingLoad, pred_gam_y2, "GAM"))
 ```
 
 ### Model 8 — MARS
@@ -784,11 +948,44 @@ MARS is applied to cooling load with the same degree-two setting to allow pairwi
 
 ```{r}
 # --- 9.8  MARS ---
-mars_y2 <- earth(CoolingLoad ~ ., data = df_train[, c(features, "CoolingLoad")], degree = 2)
+mars_y2 <- earth(CoolingLoad ~ .,
+                 data   = df_train[, c(features, "CoolingLoad")],
+                 degree = 2)
 summary(mars_y2)
 
+# Save MARS response curves
+png(file.path(img_dir, "mars_y2_response_curves.png"), width = 1400, height = 1000, res = 150)
+plotmo(mars_y2, main = "MARS Response Curves — Cooling Load (Y2)")
+dev.off()
+plotmo(mars_y2)
+
+# Save MARS variable importance
+mars_y2_imp <- evimp(mars_y2)
+print(mars_y2_imp)
+
+# evimp() returns a matrix whose column count can vary by earth version.
+# Use column index 1 (nsubsets) rather than names to stay version-safe.
+mars_imp_df_y2 <- data.frame(
+  Feature  = rownames(mars_y2_imp),
+  nsubsets = mars_y2_imp[, 1],
+  stringsAsFactors = FALSE
+) %>%
+  arrange(desc(nsubsets))
+
+p_mars_y2_imp <- ggplot(mars_imp_df_y2, aes(x = reorder(Feature, nsubsets), y = nsubsets)) +
+  geom_col(fill = "darkorange", alpha = 0.8) +
+  geom_text(aes(label = nsubsets), hjust = -0.2, size = 3) +
+  coord_flip() +
+  labs(title = "MARS Variable Importance — Cooling Load (Y2)",
+       x = "Feature", y = "Number of Model Subsets") +
+  theme_minimal()
+ggsave(file.path(img_dir, "mars_y2_variable_importance.png"),
+       plot = p_mars_y2_imp, width = 10, height = 7, dpi = 150)
+print(p_mars_y2_imp)
+
 pred_mars_y2 <- predict(mars_y2, newdata = df_test)
-results_y2 <- rbind(results_y2, eval_reg(df_test$CoolingLoad, pred_mars_y2, "MARS"))
+results_y2 <- rbind(results_y2,
+  eval_reg(df_test$CoolingLoad, pred_mars_y2, "MARS"))
 ```
 
 ### Model 9 — Regression Tree
@@ -797,13 +994,41 @@ The regression tree for cooling load is grown and pruned using the same procedur
 
 ```{r}
 # --- 9.9  Regression Tree ---
-tree_y2 <- rpart(CoolingLoad ~ ., data = df_train[, c(features, "CoolingLoad")])
+tree_y2 <- rpart(CoolingLoad ~ .,
+                 data = df_train[, c(features, "CoolingLoad")])
 optimal_cp_y2 <- tree_y2$cptable[which.min(tree_y2$cptable[, "xerror"]), "CP"]
 tree_y2_pruned <- prune(tree_y2, cp = optimal_cp_y2)
-rpart.plot(tree_y2_pruned, main = "Pruned Regression Tree — Cooling Load")
+
+# Save pruned tree
+png(file.path(img_dir, "tree_y2_pruned.png"), width = 1400, height = 900, res = 150)
+rpart.plot(tree_y2_pruned, main = "Pruned Regression Tree — Cooling Load (Y2)", roundint = FALSE)
+dev.off()
+rpart.plot(tree_y2_pruned, main = "Pruned Regression Tree — Cooling Load (Y2)")
+
+# Variable importance from rpart
+tree_y2_imp <- tree_y2_pruned$variable.importance
+if (!is.null(tree_y2_imp) && length(tree_y2_imp) > 0) {
+  tree_imp_df_y2 <- data.frame(
+    Feature    = names(tree_y2_imp),
+    Importance = as.numeric(tree_y2_imp)
+  ) %>% arrange(desc(Importance))
+
+  p_tree_y2_imp <- ggplot(tree_imp_df_y2,
+                          aes(x = reorder(Feature, Importance), y = Importance)) +
+    geom_col(fill = "darkorange", alpha = 0.8) +
+    geom_text(aes(label = round(Importance, 1)), hjust = -0.2, size = 3) +
+    coord_flip() +
+    labs(title = "Regression Tree Variable Importance — Cooling Load (Y2)",
+         x = "Feature", y = "Importance") +
+    theme_minimal()
+  ggsave(file.path(img_dir, "tree_y2_variable_importance.png"),
+         plot = p_tree_y2_imp, width = 10, height = 7, dpi = 150)
+  print(p_tree_y2_imp)
+}
 
 pred_tree_y2 <- predict(tree_y2_pruned, newdata = df_test)
-results_y2 <- rbind(results_y2, eval_reg(df_test$CoolingLoad, pred_tree_y2, "Regression Tree"))
+results_y2 <- rbind(results_y2,
+  eval_reg(df_test$CoolingLoad, pred_tree_y2, "Regression Tree"))
 ```
 
 ### Model 10 — Random Forest
@@ -813,12 +1038,21 @@ The Random Forest for cooling load uses the same hyperparameter settings as the 
 ```{r}
 # --- 9.10  Random Forest ---
 set.seed(42)
-rf_y2 <- randomForest(CoolingLoad ~ ., data = df_train[, c(features, "CoolingLoad")],
-                       ntree = 500, mtry = 3, importance = TRUE)
-varImpPlot(rf_y2, main = "RF Variable Importance — Y2")
+rf_y2 <- randomForest(CoolingLoad ~ .,
+                      data      = df_train[, c(features, "CoolingLoad")],
+                      ntree     = 500,
+                      mtry      = 3,
+                      importance = TRUE)
+
+# Save RF variable importance plot
+png(file.path(img_dir, "rf_y2_variable_importance.png"), width = 1200, height = 900, res = 150)
+varImpPlot(rf_y2, main = "Random Forest Variable Importance — Cooling Load (Y2)")
+dev.off()
+varImpPlot(rf_y2, main = "Random Forest Variable Importance — Cooling Load (Y2)")
 
 pred_rf_y2 <- predict(rf_y2, newdata = df_test)
-results_y2 <- rbind(results_y2, eval_reg(df_test$CoolingLoad, pred_rf_y2, "Random Forest"))
+results_y2 <- rbind(results_y2,
+  eval_reg(df_test$CoolingLoad, pred_rf_y2, "Random Forest"))
 ```
 
 ### Model 11 — XGBoost
@@ -827,16 +1061,30 @@ XGBoost is applied to cooling load by reusing the parameter list defined for hea
 
 ```{r}
 # --- 9.11  XGBoost ---
-# x_train and x_test were constructed in the Y1 XGBoost chunk.
 y_train_y2 <- df_train$CoolingLoad
 dtrain_y2  <- xgb.DMatrix(data = x_train, label = y_train_y2)
 dtest_y2   <- xgb.DMatrix(data = x_test,  label = df_test$CoolingLoad)
-xgb_y2 <- xgb.train(params = params_y1, data = dtrain_y2, nrounds = 200,
-                     watchlist = list(train = dtrain_y2, test = dtest_y2),
-                     verbose = 0, early_stopping_rounds = 20)
+
+xgb_y2 <- xgb.train(
+  params               = params_y1,
+  data                 = dtrain_y2,
+  nrounds              = 200,
+  watchlist            = list(train = dtrain_y2, test = dtest_y2),
+  verbose              = 0,
+  early_stopping_rounds = 20
+)
+
+xgb_imp_y2 <- xgb.importance(model = xgb_y2)
+
+# Save XGBoost feature importance plot
+png(file.path(img_dir, "xgb_y2_feature_importance.png"), width = 1200, height = 900, res = 150)
+xgb.plot.importance(xgb_imp_y2, top_n = 8, main = "XGBoost Feature Importance — Cooling Load (Y2)")
+dev.off()
+xgb.plot.importance(xgb_imp_y2, top_n = 8, main = "XGBoost Feature Importance — Cooling Load (Y2)")
 
 pred_xgb_y2 <- predict(xgb_y2, newdata = dtest_y2)
-results_y2 <- rbind(results_y2, eval_reg(df_test$CoolingLoad, pred_xgb_y2, "XGBoost"))
+results_y2 <- rbind(results_y2,
+  eval_reg(df_test$CoolingLoad, pred_xgb_y2, "XGBoost"))
 ```
 
 ### Model 12 — SVM Regression
@@ -845,11 +1093,16 @@ The radial basis function SVM is fitted to cooling load with the same cost and e
 
 ```{r}
 # --- 9.12  SVM ---
-svm_y2 <- svm(CoolingLoad ~ ., data = df_train[, c(features, "CoolingLoad")],
-              type = "eps-regression", kernel = "radial", cost = 10, epsilon = 0.1)
+svm_y2 <- svm(CoolingLoad ~ .,
+              data    = df_train[, c(features, "CoolingLoad")],
+              type    = "eps-regression",
+              kernel  = "radial",
+              cost    = 10,
+              epsilon = 0.1)
 
 pred_svm_y2 <- predict(svm_y2, newdata = df_test)
-results_y2 <- rbind(results_y2, eval_reg(df_test$CoolingLoad, pred_svm_y2, "SVM (RBF)"))
+results_y2 <- rbind(results_y2,
+  eval_reg(df_test$CoolingLoad, pred_svm_y2, "SVM (RBF)"))
 ```
 
 ### Model 13 — Neural Network
@@ -858,18 +1111,23 @@ The neural network for cooling load is trained on the same scaled features produ
 
 ```{r}
 # --- 9.13  Neural Network ---
-# Build a clean training frame: start from the 8 scaled features only, then
+# Build a clean training frame: start from the scaled features only, then
 # append CoolingLoad. This prevents HeatingLoad (added to train_scaled in the
 # Y1 NN section) from leaking into the Y2 model as a predictor.
 train_scaled_y2 <- train_scaled[, !(names(train_scaled) %in% c("HeatingLoad"))]
 train_scaled_y2$CoolingLoad <- df_train$CoolingLoad
 
 set.seed(42)
-nn_y2 <- nnet(CoolingLoad ~ ., data = train_scaled_y2, size = 10,
-              linout = TRUE, maxit = 500, decay = 0.01, trace = FALSE)
+nn_y2 <- nnet(CoolingLoad ~ ., data = train_scaled_y2,
+              size   = 10,
+              linout = TRUE,
+              maxit  = 500,
+              decay  = 0.01,
+              trace  = FALSE)
 
 pred_nn_y2 <- predict(nn_y2, newdata = test_scaled)
-results_y2 <- rbind(results_y2, eval_reg(df_test$CoolingLoad, pred_nn_y2, "Neural Network"))
+results_y2 <- rbind(results_y2,
+  eval_reg(df_test$CoolingLoad, pred_nn_y2, "Neural Network"))
 ```
 
 ### Model 14 — k-Nearest Neighbors
@@ -878,18 +1136,27 @@ k-NN is applied to cooling load using the same cross-validated k selection grid.
 
 ```{r}
 # --- 9.14  k-NN ---
-knn_y2 <- train(CoolingLoad ~ ., data = df_train[, c(features, "CoolingLoad")],
-                method = "knn", preProcess = c("center", "scale"),
-                trControl = knn_ctrl,
-                tuneGrid = data.frame(k = c(3, 5, 7, 9, 11, 15)))
+knn_y2 <- train(CoolingLoad ~ .,
+                data      = df_train[, c(features, "CoolingLoad")],
+                method    = "knn",
+                preProcess = c("center", "scale"),
+                trControl  = knn_ctrl,
+                tuneGrid   = data.frame(k = c(3, 5, 7, 9, 11, 15)))
+
+# Save k-NN tuning curve
+png(file.path(img_dir, "knn_y2_tuning_curve.png"), width = 900, height = 700, res = 150)
+print(plot(knn_y2, main = "k-NN CV Tuning — Cooling Load (Y2)"))
+dev.off()
+plot(knn_y2)
 
 pred_knn_y2 <- predict(knn_y2, newdata = df_test)
-results_y2 <- rbind(results_y2, eval_reg(df_test$CoolingLoad, pred_knn_y2, "k-NN Regression"))
+results_y2 <- rbind(results_y2,
+  eval_reg(df_test$CoolingLoad, pred_knn_y2, "k-NN Regression"))
 ```
 
 ### Y2 — Model Comparison
 
-The final comparison ranks all eight nonlinear and semi-parametric models for cooling load by test set RMSE. Taken together with the equivalent table for heating load, these results give a clear picture of which flexible approaches generalise best across both energy demands and which are more target-specific in their performance.
+The final comparison ranks all nonlinear and semi-parametric models for cooling load by test set RMSE. Taken together with the equivalent table for heating load, these results give a clear picture of which flexible approaches generalise best across both energy demands and which are more target-specific in their performance.
 
 ```{r}
 # ============================================================
@@ -899,19 +1166,25 @@ results_y2 <- results_y2 %>% arrange(RMSE)
 cat("\n========== Y2: COOLING LOAD — SEMI-PARAMETRIC & NONLINEAR MODEL COMPARISON ==========\n")
 print(results_y2, row.names = FALSE)
 
-ggplot(results_y2, aes(x = reorder(Model, RMSE), y = RMSE)) +
+p_rmse_y2 <- ggplot(results_y2, aes(x = reorder(Model, RMSE), y = RMSE)) +
   geom_col(fill = "darkorange", alpha = 0.8) +
   geom_text(aes(label = round(RMSE, 3)), hjust = -0.1, size = 3) +
   coord_flip() +
   labs(title = "Semi-parametric & Nonlinear Model Comparison — Cooling Load (Y2)",
        x = "Model", y = "RMSE (Test Set)") +
   theme_minimal()
+ggsave(file.path(img_dir, "comparison_y2_rmse.png"),
+       plot = p_rmse_y2, width = 10, height = 7, dpi = 150)
+print(p_rmse_y2)
 
-ggplot(results_y2, aes(x = reorder(Model, -R2), y = R2)) +
+p_r2_y2 <- ggplot(results_y2, aes(x = reorder(Model, -R2), y = R2)) +
   geom_col(fill = "darkgreen", alpha = 0.7) +
   geom_text(aes(label = round(R2, 4)), hjust = -0.1, size = 3) +
   coord_flip() +
   labs(title = "R² Comparison — Cooling Load (Y2)",
        x = "Model", y = "R²") +
   theme_minimal()
+ggsave(file.path(img_dir, "comparison_y2_r2.png"),
+       plot = p_r2_y2, width = 10, height = 7, dpi = 150)
+print(p_r2_y2)
 ```
