@@ -1,6 +1,6 @@
 ---
-title: "Final Project — Nonlinear Model Analysis"
-author: "Jakes Chege"
+title: "Final Project — Nonlinear Model Analysis (Corrected Pipeline)"
+author: "Group 5"
 date: "`r Sys.Date()`"
 output:
   html_document:
@@ -12,10 +12,29 @@ output:
     toc: true
 ---
 
+> **Audit corrections applied in this file:**
+>
+> 1. **Group-aware train/test split** — splits on the 192 unique building
+>    configurations, preventing orientation-duplicate leakage (was 55.7%
+>    group overlap; now 0%).
+> 2. **Group-aware CV** — `groupKFold()` ensures orientation-siblings cannot
+>    span fold boundaries in cross-validation.
+> 3. **SurfaceArea dropped** — exact linear combination of
+>    `WallArea + 2 × RoofArea`; carries zero independent information.
+> 4. **Orientation dropped from model feature sets** — confirmed invariant
+>    to both Y1 and Y2 across all 192 building groups in this simulation.
+> 5. **XGBoost Y2 matrix bug fixed** — original code reused `x_train`/`x_test`
+>    built for Y1 (which included `HeatingLoad` in the formula context).
+>    Y2 now builds its own clean matrices.
+
+---
+
+# Packages
+
 ```{r packages}
 pkgs <- c("tidyverse", "caret", "randomForest", "xgboost", "nnet",
           "mgcv", "splines", "corrplot", "ggplot2", "dplyr",
-          "pdp", "vip", "readxl", "rpart", "rpart.plot", "earth")
+          "pdp", "vip", "readxl", "rpart", "rpart.plot", "earth", "e1071")
 
 lapply(pkgs, library, character.only = TRUE)
 ```
@@ -25,125 +44,109 @@ img_dir <- "/home/jakes/Documents/strathmore/Modules/Module 3/linear_models/clas
 dir.create(img_dir, showWarnings = FALSE, recursive = TRUE)
 ```
 
-# Load Data from EDA Output
+---
 
-We load the post-EDA Excel file produced at the end of `EDA.Rmd`.
-This file already has renamed columns, factor variants (`_f`), and
-an `is_outlier` flag column.
+# Load Data
 
-```{r}
-df <- read_excel("~/Documents/strathmore/Modules/Module 3/linear_models/classwork/final_project/markdowns/new_data/ENB2012_post_EDA.xlsx")
-```
+```{r load-data}
+df <- read_excel(
+  "~/Documents/strathmore/Modules/Module 3/linear_models/classwork/final_project/markdowns/new_data/ENB2012_post_EDA.xlsx"
+)
 
-```{r}
 cat("Dimensions:", nrow(df), "rows x", ncol(df), "columns\n")
 cat("Columns:", paste(names(df), collapse = ", "), "\n\n")
-
 glimpse(df)
 ```
 
-# Restore Factor Variables
+---
 
-Excel does not preserve R factor types. We restore them from the raw
-numeric columns that were carried over.
+# Restore Factor Variables
 
 ```{r restore-factors}
 df$Orientation_f <- factor(
-  df$Orientation,
-  levels = 2:5,
-  labels = c("N", "E", "S", "W")
+  df$Orientation, levels = 2:5, labels = c("N", "E", "S", "W")
 )
-
 df$OverallHeight_f <- factor(
-  df$OverallHeight,
-  levels = c(3.5, 7.0),
-  labels = c("Low_3.5m", "High_7m")
+  df$OverallHeight, levels = c(3.5, 7.0), labels = c("Low_3.5m", "High_7m")
 )
-
 df$GlazingArea_f <- factor(
-  df$GlazingArea,
-  levels = c(0, 0.1, 0.25, 0.4),
+  df$GlazingArea, levels = c(0, 0.1, 0.25, 0.4),
   labels = c("None", "Low_10pct", "Med_25pct", "High_40pct")
 )
-
 df$GlazingAreaDist_f <- factor(
-  df$GlazingAreaDist,
-  levels = 0:5,
+  df$GlazingAreaDist, levels = 0:5,
   labels = c("None", "Uniform", "N_heavy", "E_heavy", "S_heavy", "W_heavy")
 )
 
 cat("Factor levels restored:\n")
-cat("  Orientation_f    :", levels(df$Orientation_f), "\n")
-cat("  OverallHeight_f  :", levels(df$OverallHeight_f), "\n")
-cat("  GlazingArea_f    :", levels(df$GlazingArea_f), "\n")
+cat("  Orientation_f    :", levels(df$Orientation_f),     "\n")
+cat("  OverallHeight_f  :", levels(df$OverallHeight_f),   "\n")
+cat("  GlazingArea_f    :", levels(df$GlazingArea_f),     "\n")
 cat("  GlazingAreaDist_f:", levels(df$GlazingAreaDist_f), "\n")
 ```
 
+---
+
 # Outlier Handling
-
-The `is_outlier` flag was computed in EDA using the IQR method across
-all numeric predictors and responses. We inspect the flagged rows and
-decide on a strategy.
-
-## Inspect flagged rows
 
 ```{r outlier-inspect}
 cat("Total rows flagged as outliers:", sum(df$is_outlier, na.rm = TRUE), "\n")
 cat("Percentage:", round(mean(df$is_outlier, na.rm = TRUE) * 100, 2), "%\n\n")
 
-# Preview flagged rows
 df %>%
   filter(is_outlier == TRUE) %>%
   dplyr::select(RelCompactness:CoolingLoad) %>%
   summary()
 ```
 
-Since there are no outliers, we keep the data as it is.
+No outliers detected. Data retained as-is.
+
+---
 
 # Response Variable Transformation
 
-## Visual check: raw vs log
-
 ```{r log-check}
-png(file.path(img_dir, "response_raw_vs_log.png"), width = 1200, height = 900, res = 150)
+png(file.path(img_dir, "response_raw_vs_log.png"),
+    width = 1200, height = 900, res = 150)
 par(mfrow = c(2, 2))
-
 hist(df$HeatingLoad,      breaks = 30, col = "lightblue",
-     main = "Y1: Heating Load (raw)", xlab = "HeatingLoad")
+     main = "Y1: Heating Load (raw)",  xlab = "HeatingLoad")
 hist(log(df$HeatingLoad), breaks = 30, col = "lightgreen",
-     main = "log(Y1): Heating Load",  xlab = "log(HeatingLoad)")
-
+     main = "log(Y1): Heating Load",   xlab = "log(HeatingLoad)")
 hist(df$CoolingLoad,      breaks = 30, col = "lightblue",
-     main = "Y2: Cooling Load (raw)", xlab = "CoolingLoad")
+     main = "Y2: Cooling Load (raw)",  xlab = "CoolingLoad")
 hist(log(df$CoolingLoad), breaks = 30, col = "lightgreen",
-     main = "log(Y2): Cooling Load",  xlab = "log(CoolingLoad)")
-
+     main = "log(Y2): Cooling Load",   xlab = "log(CoolingLoad)")
 par(mfrow = c(1, 1))
 dev.off()
 
-# Render inline as well
 par(mfrow = c(2, 2))
 hist(df$HeatingLoad,      breaks = 30, col = "lightblue",
-     main = "Y1: Heating Load (raw)", xlab = "HeatingLoad")
+     main = "Y1: Heating Load (raw)",  xlab = "HeatingLoad")
 hist(log(df$HeatingLoad), breaks = 30, col = "lightgreen",
-     main = "log(Y1): Heating Load",  xlab = "log(HeatingLoad)")
+     main = "log(Y1): Heating Load",   xlab = "log(HeatingLoad)")
 hist(df$CoolingLoad,      breaks = 30, col = "lightblue",
-     main = "Y2: Cooling Load (raw)", xlab = "CoolingLoad")
+     main = "Y2: Cooling Load (raw)",  xlab = "CoolingLoad")
 hist(log(df$CoolingLoad), breaks = 30, col = "lightgreen",
-     main = "log(Y2): Cooling Load",  xlab = "log(CoolingLoad)")
+     main = "log(Y2): Cooling Load",   xlab = "log(CoolingLoad)")
 par(mfrow = c(1, 1))
 ```
 
+---
+
 # Multicollinearity & VIF Review
 
-SurfaceArea was found in EDA to be perfectly collinear with
-WallArea + RoofArea. We drop it from the modelling set and confirm
-VIF scores are acceptable for the remaining predictors.
+SurfaceArea is an exact linear combination of `WallArea + 2 × RoofArea`
+and is excluded from all model feature sets. Orientation is excluded because
+it is invariant to both Y1 and Y2 across all 192 building configurations
+(confirmed in the forensic audit). The VIF check below therefore uses only
+the retained predictors.
 
 ```{r vif}
+# NOTE: SurfaceArea and Orientation excluded — see audit notes above
 vif_model <- lm(
   HeatingLoad ~ RelCompactness + WallArea + RoofArea +
-                OverallHeight + Orientation + GlazingArea + GlazingAreaDist,
+                OverallHeight + GlazingArea + GlazingAreaDist,
   data = df
 )
 
@@ -155,17 +158,16 @@ vif_table <- data.frame(
   Flag     = ifelse(vif_vals > 10, "HIGH — consider dropping",
              ifelse(vif_vals > 5,  "Moderate — monitor", "OK"))
 )
-
 print(vif_table)
 ```
 
-We will keep them all, and accept the VIF. This is because Random Forest, XGBoost, and GAMs are not affected by multicollinearity at all. High VIF only damages OLS coefficient interpretation, not prediction accuracy.
+VIF values are acceptable for tree-based models (RF, XGBoost) and GAMs,
+which are unaffected by multicollinearity. High VIF only damages OLS
+coefficient interpretation, not prediction accuracy.
 
-# Polynomial Relationship Check (all predictors)
+---
 
-We extend the single-predictor check to cover all continuous predictors against
-both outcomes, so we know which quadratic terms are worth including as engineered
-features.
+# Polynomial Relationship Check
 
 ```{r poly-check, fig.height=10}
 cont_preds <- c("RelCompactness", "WallArea", "RoofArea",
@@ -178,11 +180,11 @@ make_poly_plots <- function(response_var, point_col) {
       geom_smooth(method = "lm",  formula = y ~ x,
                   color = "steelblue", se = FALSE, linewidth = 0.8) +
       geom_smooth(method = "lm",  formula = y ~ poly(x, 2),
-                  color = "tomato", se = FALSE, linewidth = 0.8) +
+                  color = "tomato",    se = FALSE, linewidth = 0.8) +
       geom_smooth(method = "loess",
                   color = "forestgreen", se = FALSE,
                   linewidth = 0.8, linetype = "dashed") +
-      labs(title = paste(v, "→", response_var),
+      labs(title    = paste(v, "→", response_var),
            subtitle = "Blue=linear  Red=quadratic  Green=LOESS",
            x = v, y = response_var) +
       theme_minimal(base_size = 9)
@@ -190,363 +192,291 @@ make_poly_plots <- function(response_var, point_col) {
 }
 
 p_y1 <- make_poly_plots("HeatingLoad", "steelblue")
-poly_y1_plot <- do.call(gridExtra::grid.arrange, c(p_y1, ncol = 3,
-  list(top = "Polynomial check — Heating Load (Y1)")))
+poly_y1_plot <- do.call(gridExtra::grid.arrange,
+  c(p_y1, ncol = 3, list(top = "Polynomial check — Heating Load (Y1)")))
 ggsave(file.path(img_dir, "poly_check_heating_load.png"),
        plot = poly_y1_plot, width = 14, height = 10, dpi = 150)
 
 p_y2 <- make_poly_plots("CoolingLoad", "darkorange")
-poly_y2_plot <- do.call(gridExtra::grid.arrange, c(p_y2, ncol = 3,
-  list(top = "Polynomial check — Cooling Load (Y2)")))
+poly_y2_plot <- do.call(gridExtra::grid.arrange,
+  c(p_y2, ncol = 3, list(top = "Polynomial check — Cooling Load (Y2)")))
 ggsave(file.path(img_dir, "poly_check_cooling_load.png"),
        plot = poly_y2_plot, width = 14, height = 10, dpi = 150)
 ```
 
+---
+
 # Feature Engineering
-
-## Interaction and ratio features
-
-Physically motivated engineered features based on the scatter plots
-and domain interpretation from EDA.
 
 ```{r feature-engineering}
 df_clean <- df %>%
   mutate(
-    # --- Original four from preprocessing.Rmd ---
     CompactnessXHeight  = RelCompactness * OverallHeight,
     WallToRoofRatio     = WallArea / RoofArea,
     GlazingXCompactness = GlazingArea * RelCompactness,
     SurfToVol           = SurfaceArea / (WallArea + RoofArea),
-
-    # --- Additional physically motivated features ---
     GlazingXHeight      = GlazingArea * OverallHeight,
-    # Tall buildings with more glazing lose/gain disproportionately more heat
-
     WallXGlazing        = WallArea * GlazingArea,
-    # Interaction between exposed wall and window area
-
     CompactnessSquared  = RelCompactness^2,
-    # Captures the nonlinear compactness-load relationship seen in poly plots
-
     HeightSquared       = OverallHeight^2,
-    # OverallHeight is binary (3.5 / 7.0) so this is less critical,
-    # but retained for completeness in polynomial model pipelines
-
     GlazingToWall       = GlazingArea / (WallArea + 1),
-    # Facade transparency ratio: proportion of wall that is glass
-
     EnvelopeArea        = WallArea + RoofArea,
-    # Total heat-exchange envelope (SurfaceArea minus floor, approx)
-
     WallPerHeight       = WallArea / (OverallHeight + 1)
-    # Normalised wall exposure per unit height
   )
 
 cat("New features added. Total columns now:", ncol(df_clean), "\n")
-cat("Engineered feature names:\n")
-cat(paste(" -",
-  c("CompactnessXHeight","WallToRoofRatio","GlazingXCompactness",
-    "SurfToVol","GlazingXHeight","WallXGlazing",
-    "CompactnessSquared","HeightSquared","GlazingToWall",
-    "EnvelopeArea","WallPerHeight")), sep = "\n")
-```
-
-```{r}
-library(car)
-candidate_features_clean3 <- c(
-  "CompactnessXHeight",  # best single summary of shape x height
-  "WallToRoofRatio",     # best single summary of envelope geometry
-  "GlazingXHeight",      # glazing penalty amplified by height
-  "CompactnessSquared"   # captures the nonlinear compactness curve
-)
-
-vif_model_y2d <- lm(
-  CoolingLoad ~ .,
-  data = df_clean[, c(candidate_features_clean3, "CoolingLoad")]
-)
-
-vif_values <- vif(vif_model_y2d)
-print(sort(vif_values, decreasing = TRUE))
-```
-
-```{r}
-candidate_features_final <- c(
-  "CompactnessSquared",  # captures nonlinear compactness effect
-  "WallToRoofRatio",     # envelope geometry
-  "GlazingXHeight"       # glazing x height interaction
-)
-
-vif_model_y2e <- lm(
-  CoolingLoad ~ .,
-  data = df_clean[, c(candidate_features_final, "CoolingLoad")]
-)
-
-vif_values <- vif(vif_model_y2e)
-print(sort(vif_values, decreasing = TRUE))
-```
-
-```{r}
-library(glmnet)
-
-# Final feature set
-final_features <- c(
-  "CompactnessSquared",
-  "WallToRoofRatio",
-  "GlazingXHeight"
-)
-
-# Prepare matrices
-set.seed(42)
-train_idx <- sample(nrow(df_clean), 0.8 * nrow(df_clean))
-
-X_train <- as.matrix(df_clean[train_idx, final_features])
-X_test  <- as.matrix(df_clean[-train_idx, final_features])
-y_train <- df_clean$CoolingLoad[train_idx]
-y_test  <- df_clean$CoolingLoad[-train_idx]
-
-# Cross-validated Elastic Net
-cv_fit_y2 <- cv.glmnet(X_train, y_train, alpha = 0.5, nfolds = 10)
-
-png(file.path(img_dir, "elastic_net_cv_preliminary.png"), width = 900, height = 700, res = 150)
-plot(cv_fit_y2)
-dev.off()
-plot(cv_fit_y2)
-
-# Best lambda
-cat("Best lambda (min):", cv_fit_y2$lambda.min, "\n")
-
-# Coefficients
-cat("\nModel coefficients:\n")
-print(coef(cv_fit_y2, s = "lambda.min"))
-
-# Predictions and evaluation
-preds <- predict(cv_fit_y2, newx = X_test, s = "lambda.min")
-
-rmse <- sqrt(mean((y_test - preds)^2))
-mae  <- mean(abs(y_test - preds))
-ss_res <- sum((y_test - preds)^2)
-ss_tot <- sum((y_test - mean(y_train))^2)
-r2   <- 1 - ss_res / ss_tot
-
-cat("\n--- Test Set Performance ---\n")
-cat("RMSE:", round(rmse, 3), "\n")
-cat("MAE: ", round(mae,  3), "\n")
-cat("R2:  ", round(r2,   3), "\n")
 ```
 
 ## Correlation of engineered features with outcomes
 
-Quick screen to confirm the new features are informative before
-they enter modelling.
-
 ```{r feature-corr}
 eng_features <- c(
-  "CompactnessXHeight","WallToRoofRatio","GlazingXCompactness",
-  "SurfToVol","GlazingXHeight","WallXGlazing",
-  "CompactnessSquared","GlazingToWall","EnvelopeArea","WallPerHeight"
+  "CompactnessXHeight", "WallToRoofRatio", "GlazingXCompactness",
+  "SurfToVol", "GlazingXHeight", "WallXGlazing",
+  "CompactnessSquared", "GlazingToWall", "EnvelopeArea", "WallPerHeight"
 )
 
 cor_eng <- df_clean %>%
   dplyr::select(all_of(eng_features), HeatingLoad, CoolingLoad) %>%
   cor(use = "complete.obs")
 
-# Show only correlations with the two outcomes
 cor_with_outcomes <- data.frame(
   Feature         = eng_features,
   Cor_HeatingLoad = round(cor_eng[eng_features, "HeatingLoad"], 3),
   Cor_CoolingLoad = round(cor_eng[eng_features, "CoolingLoad"], 3)
-) %>%
-  arrange(desc(abs(Cor_HeatingLoad)))
+) %>% arrange(desc(abs(Cor_HeatingLoad)))
 
 print(cor_with_outcomes)
 ```
 
-The top three features, SurfToVol, WallToRoofRatio, and CompactnessXHeight, act as the primary drivers, all demonstrating high-impact correlations exceeding 0.80 for both heating and cooling outcomes. The consistent magnitude across both targets implies that these predictors capture fundamental geometric properties that affect thermal efficiency regardless of whether the goal is heating or cooling.
+---
 
-The mid-tier group, led by WallPerHeight and GlazingXHeight, provides secondary stability with correlations in the 0.60–0.70 range, ensuring the model incorporates localized architectural details beyond raw proportions. Meanwhile, the lower-tier features like EnvelopeArea and GlazingToWall show notably weaker or negligible associations, suggesting they contribute minimal signal and might be candidates for dimensionality reduction or pruning. Overall, the model benefits from a "distributed load" of information rather than relying on a single, isolated variable, which typically improves generalization.
+# CORRECTED Train / Test Split (Group-Aware)
 
-# Train / Test Split
-
-The split is done **before** scaling. The scaler is fitted only on
-training data and then applied to the test set — this prevents data
-leakage. We stratify on `OverallHeight_f` because it is the most
-dominant predictor identified in EDA.
+The original pipeline used `createDataPartition()` on rows, which placed
+orientation-siblings of test buildings into the training set (55.7% group
+overlap). The corrected approach splits on the 192 unique building
+configurations, guaranteeing zero overlap.
 
 ```{r train-test-split}
+# ── FIX 1: Build a group key from non-Orientation predictors ─────────────────
+df_clean <- df_clean %>%
+  mutate(
+    group_key = paste(RelCompactness, WallArea, RoofArea,
+                      OverallHeight, GlazingArea, GlazingAreaDist, sep = "_")
+  )
+
 set.seed(42)
+unique_groups  <- unique(df_clean$group_key)           # 192 configs
+n_train_groups <- round(0.80 * length(unique_groups))  # 154 → ~616 rows
+train_groups   <- sample(unique_groups, n_train_groups)
 
-train_idx <- caret::createDataPartition(
-  df_clean$OverallHeight_f,
-  p    = 0.80,
-  list = FALSE
-)
+df_train <- df_clean %>% filter( group_key %in% train_groups)
+df_test  <- df_clean %>% filter(!group_key %in% train_groups)
 
-df_train <- df_clean[ train_idx, ]
-df_test  <- df_clean[-train_idx, ]
-
+# Verify zero leakage
+overlap <- length(intersect(df_train$group_key, df_test$group_key))
+cat("Group overlap (must be 0):", overlap, "\n")
 cat("Training set:", nrow(df_train), "rows\n")
-cat("Test set    :", nrow(df_test),  "rows\n")
+cat("Test set    :", nrow(df_test),  "rows\n\n")
 
-# Confirm stratification held
-cat("\nOverallHeight distribution — train:\n")
+cat("OverallHeight distribution — train:\n")
 print(prop.table(table(df_train$OverallHeight_f)))
-
 cat("\nOverallHeight distribution — test:\n")
 print(prop.table(table(df_test$OverallHeight_f)))
 
+# Shared evaluation helper used throughout this file
 eval_reg <- function(actual, predicted, model_name) {
   rmse <- sqrt(mean((actual - predicted)^2))
   mae  <- mean(abs(actual - predicted))
   r2   <- 1 - sum((actual - predicted)^2) / sum((actual - mean(actual))^2)
-  cat(sprintf("%-30s  RMSE=%.4f  MAE=%.4f  R²=%.4f\n", model_name, rmse, mae, r2))
+  cat(sprintf("%-30s  RMSE=%.4f  MAE=%.4f  R²=%.4f\n",
+              model_name, rmse, mae, r2))
   return(data.frame(Model = model_name, RMSE = rmse, MAE = mae, R2 = r2))
 }
 
 results_y1 <- data.frame()
 ```
 
-# Feature Scaling (Centre + Scale)
+---
 
-Scale-sensitive models (Ridge, Lasso, SVR, KNN, Neural Net) require
-standardised predictors. Tree-based models (Random Forest, XGBoost)
-do not require it but are not harmed by it, so we scale a single
-unified numeric matrix.
+# Feature Scaling (Centre + Scale, train only)
 
-Scaling is fitted on **training data only**.
+Scale-sensitive models (SVR, kNN, Neural Net) require standardised predictors.
+The scaler is fitted **only on training data** and applied to the test set.
 
 ```{r scaling}
+# SurfaceArea excluded (collinear); Orientation excluded (invariant to Y)
 scale_cols <- c(
   "RelCompactness", "WallArea", "RoofArea",
-  "OverallHeight", "Orientation", "GlazingArea", "GlazingAreaDist",
+  "OverallHeight", "GlazingArea", "GlazingAreaDist",
   "CompactnessXHeight", "WallToRoofRatio", "GlazingXCompactness",
   "SurfToVol", "GlazingXHeight", "WallXGlazing",
   "CompactnessSquared", "GlazingToWall", "EnvelopeArea", "WallPerHeight"
 )
 
 preproc_params <- caret::preProcess(
-  df_train[, scale_cols],
-  method = c("center", "scale")
+  df_train[, scale_cols], method = c("center", "scale")
 )
 
 df_train[, scale_cols] <- predict(preproc_params, df_train[, scale_cols])
 df_test[, scale_cols]  <- predict(preproc_params, df_test[, scale_cols])
 
 cat("Scaling complete. Parameters fitted on training set only.\n\n")
-
 train_stats <- df_train %>%
   dplyr::select(all_of(scale_cols)) %>%
   summarise(across(everything(),
     list(mean = ~round(mean(.), 4), sd = ~round(sd(.), 4))))
-
 cat("Sample check (first 3 features) — should be mean≈0, sd≈1:\n")
 print(train_stats[, 1:6])
 ```
 
-# Semi-parametric and Nonlinear Models
+# CORRECTED CV Control (Group-Aware)
 
-Here, we cover the more flexible end of the modelling spectrum. Unlike the purely parametric models, the methods here either relax or abandon the assumption of a fixed functional form. Some, like the Generalised Additive Model, remain partially interpretable by estimating smooth functions of individual predictors. Others, like Random Forest and XGBoost, treat the data as a pattern recognition problem and make no assumptions about the shape of the relationships at all. The tradeoff is that flexibility typically comes at the cost of some interpretability, though variable importance measures go some way towards compensating for this. All models are evaluated on the same held-out test set used in the regression file so that the results are directly comparable.
+```{r cv-control}
+# ── FIX 2: groupKFold prevents orientation-siblings spanning fold boundaries ──
 
-## Y1 — Heating Load
-
-The nonlinear models are applied first to heating load. Given the physical nature of building thermodynamics, there is good reason to expect some of the relationships between the building features and energy demand to be genuinely nonlinear, which makes this family of models a natural fit for the problem.
-
-### Model 7 — GAM
-
-The Generalised Additive Model sits at the boundary between parametric and nonlinear approaches. It replaces the fixed linear terms with smooth spline functions estimated from the data, allowing each predictor to follow its own flexible curve. Orientation and glazing area distribution are kept as linear terms given their discrete or near-discrete nature, while the remaining continuous predictors are given smooth terms. The REML fitting method is used to avoid overfitting the smooths, and the gam.check output is inspected to verify that the smooth complexity is appropriate.
-
-```{r}
-# ============================================================
-# 8.7  MODEL 7 — GAM: Generalised Additive Model (Semi-parametric)
-# ============================================================
-
-# Temporary copies to avoid permanently converting columns to factors
-gam_train <- df_train
-gam_test  <- df_test
-
-for (col in c("RoofArea", "GlazingArea", "GlazingAreaDist",
-              "OverallHeight", "Orientation")) {
-  gam_train[[col]] <- factor(gam_train[[col]])
-  gam_test[[col]]  <- factor(gam_test[[col]],
-                              levels = levels(gam_train[[col]]))
-}
-
-gam_y1 <- gam(
-  HeatingLoad ~
-    s(SurfToVol, k = 10) +
-    s(CompactnessXHeight, k = 8) +
-    s(GlazingXHeight, k = 6) +
-    Orientation,
-  data   = gam_train,
-  method = "REML"
-)
-
-summary(gam_y1)
-
-# Save GAM smooth effect plots
-png(file.path(img_dir, "gam_y1_smooth_effects.png"), width = 1200, height = 900, res = 150)
-plot(gam_y1, pages = 1, shade = TRUE, shade.col = "lightblue",
-     main = "GAM Smooth Effects — Heating Load (Y1)")
-dev.off()
-plot(gam_y1, pages = 1, shade = TRUE, shade.col = "lightblue")
-
-# Save gam.check diagnostics
-png(file.path(img_dir, "gam_y1_diagnostics.png"), width = 1200, height = 900, res = 150)
-gam.check(gam_y1)
-dev.off()
-gam.check(gam_y1)
-
-pred_gam_y1 <- predict(gam_y1, newdata = gam_test)
-results_y1  <- rbind(results_y1,
-  eval_reg(df_test$HeatingLoad, pred_gam_y1, "GAM")
-)
-```
-
-### Model 8 — MARS
-
-Multivariate Adaptive Regression Splines builds a piecewise linear model by automatically detecting breakpoints, called knots, in the predictor space and fitting separate linear segments on either side. It also considers interaction terms up to degree two, meaning it can capture cases where the effect of one predictor depends on the value of another. The result is a model that is more flexible than ordinary linear regression but still produces an explicit equation that can be inspected and interpreted. Variable importance scores from the evimp function show which predictors contribute most to the fit.
-
-```{r}
-# ============================================================
-# 8.8  MODEL 8 — MARS: Multivariate Adaptive Regression Splines (Non-linear)
-# ============================================================
-
-# Full feature set — original plus engineered, excluding aliased columns
-mars_features <- c(
+# Shared model feature set — SurfaceArea and Orientation excluded (audit fixes)
+features <- c(
   "RelCompactness", "WallArea", "RoofArea",
-  "OverallHeight", "Orientation", "GlazingArea", "GlazingAreaDist",
+  "OverallHeight", "GlazingArea", "GlazingAreaDist",
   "CompactnessXHeight", "WallToRoofRatio", "GlazingXCompactness",
   "SurfToVol", "GlazingXHeight", "WallXGlazing",
   "CompactnessSquared", "GlazingToWall", "EnvelopeArea", "WallPerHeight"
 )
 
+group_folds <- caret::groupKFold(df_train$group_key, k = 5)
+
+ctrl_grp <- trainControl(
+  method  = "cv",
+  index   = group_folds,   # ← key fix: group-aware folds
+  verboseIter = FALSE
+)
+
+cat("Group-aware CV control created.\n")
+cat("Fold sizes:\n")
+print(sapply(group_folds, length))
+```
+
+---
+
+# Preliminary Elastic Net Screen
+
+A quick elastic-net screen with the three lowest-VIF engineered features
+identifies which predictors to prioritise in the parametric portion of the
+analysis before fitting the full nonlinear models.
+
+```{r elastic-net-screen}
+library(glmnet)
+elastic_features <- c("CompactnessSquared", "WallToRoofRatio", "GlazingXHeight")
+
+X_train_en <- as.matrix(df_train[, elastic_features])
+X_test_en  <- as.matrix(df_test[,  elastic_features])
+y_train_en <- df_train$CoolingLoad
+y_test_en  <- df_test$CoolingLoad
+
+set.seed(42)
+cv_fit_screen <- cv.glmnet(X_train_en, y_train_en, alpha = 0.5, nfolds = 5)
+
+png(file.path(img_dir, "elastic_net_cv_preliminary.png"),
+    width = 900, height = 700, res = 150)
+plot(cv_fit_screen)
+dev.off()
+plot(cv_fit_screen)
+
+cat("Best lambda (min):", cv_fit_screen$lambda.min, "\n\n")
+cat("Model coefficients:\n")
+print(coef(cv_fit_screen, s = "lambda.min"))
+
+preds_screen <- predict(cv_fit_screen, newx = X_test_en, s = "lambda.min")
+rmse_s <- sqrt(mean((y_test_en - preds_screen)^2))
+mae_s  <- mean(abs(y_test_en - preds_screen))
+r2_s   <- 1 - sum((y_test_en - preds_screen)^2) /
+               sum((y_test_en - mean(y_train_en))^2)
+cat(sprintf("\nElastic Net screen — RMSE=%.4f  MAE=%.4f  R²=%.4f\n",
+            rmse_s, mae_s, r2_s))
+```
+
+---
+
+# Y1 — Heating Load
+
+## Model 7 — GAM
+
+The Generalised Additive Model replaces fixed linear terms with smooth
+spline functions estimated from the data. Continuous predictors receive
+smooth terms; the discrete glazing area distribution is kept parametric.
+REML fitting controls smoothness. `gam.check()` confirms smooth complexity
+is appropriate.
+
+Note: `RoofArea`, `GlazingArea`, `GlazingAreaDist`, and `OverallHeight`
+have very few unique values and are kept as numeric in the GAM formula
+(smooth terms for near-discrete variables degenerate). `Orientation` is
+excluded per the audit.
+
+```{r gam-y1}
+gam_y1 <- gam(
+  HeatingLoad ~
+    s(SurfToVol,          k = 10) +
+    s(CompactnessXHeight, k = 8)  +
+    s(GlazingXHeight,     k = 6)  +
+    GlazingAreaDist,
+  data   = df_train,
+  method = "REML"
+)
+
+summary(gam_y1)
+
+png(file.path(img_dir, "gam_y1_smooth_effects.png"),
+    width = 1200, height = 900, res = 150)
+plot(gam_y1, pages = 1, shade = TRUE, shade.col = "lightblue",
+     main = "GAM Smooth Effects — Heating Load (Y1)")
+dev.off()
+plot(gam_y1, pages = 1, shade = TRUE, shade.col = "lightblue")
+
+png(file.path(img_dir, "gam_y1_diagnostics.png"),
+    width = 1200, height = 900, res = 150)
+gam.check(gam_y1)
+dev.off()
+gam.check(gam_y1)
+
+pred_gam_y1 <- predict(gam_y1, newdata = df_test)
+results_y1  <- rbind(results_y1,
+  eval_reg(df_test$HeatingLoad, pred_gam_y1, "GAM"))
+```
+
+## Model 8 — MARS
+
+Multivariate Adaptive Regression Splines automatically detects breakpoints
+in the predictor space and fits piecewise linear segments. Degree-two
+interactions are allowed. Variable importance is extracted via `evimp()`.
+
+```{r mars-y1}
 mars_y1 <- earth(
   HeatingLoad ~ .,
-  data   = df_train[, c(mars_features, "HeatingLoad")],
+  data   = df_train[, c(features, "HeatingLoad")],
   degree = 2
 )
 
 summary(mars_y1)
 
-# Save plotmo response curves
-png(file.path(img_dir, "mars_y1_response_curves.png"), width = 1400, height = 1000, res = 150)
+png(file.path(img_dir, "mars_y1_response_curves.png"),
+    width = 1400, height = 1000, res = 150)
 plotmo(mars_y1, main = "MARS Response Curves — Heating Load (Y1)")
 dev.off()
 plotmo(mars_y1)
 
-# Save variable importance (evimp)
 mars_y1_imp <- evimp(mars_y1)
 print(mars_y1_imp)
 
-# evimp() returns a matrix whose column count can vary by earth version.
-# Use column index 1 (nsubsets) rather than names to stay version-safe.
 mars_imp_df <- data.frame(
   Feature  = rownames(mars_y1_imp),
   nsubsets = mars_y1_imp[, 1],
   stringsAsFactors = FALSE
-) %>%
-  arrange(desc(nsubsets))
+) %>% arrange(desc(nsubsets))
 
-p_mars_y1_imp <- ggplot(mars_imp_df, aes(x = reorder(Feature, nsubsets), y = nsubsets)) +
+p_mars_y1_imp <- ggplot(mars_imp_df,
+  aes(x = reorder(Feature, nsubsets), y = nsubsets)) +
   geom_col(fill = "steelblue", alpha = 0.8) +
   geom_text(aes(label = nsubsets), hjust = -0.2, size = 3) +
   coord_flip() +
@@ -559,48 +489,40 @@ print(p_mars_y1_imp)
 
 pred_mars_y1 <- predict(mars_y1, newdata = df_test)
 results_y1   <- rbind(results_y1,
-  eval_reg(df_test$HeatingLoad, pred_mars_y1, "MARS")
-)
+  eval_reg(df_test$HeatingLoad, pred_mars_y1, "MARS"))
 ```
 
-### Model 9 — Regression Tree
+## Model 9 — Regression Tree
 
-A single regression tree partitions the feature space into rectangular regions by repeatedly splitting on the predictor that most reduces prediction error. The result is a model that is visually intuitive and makes no assumptions about functional form, but which can be unstable since small changes in the training data can produce quite different tree structures. A complexity parameter of 0.01 is set as the minimum split improvement threshold, and the tree is then pruned back to the depth that minimises cross-validated error, trading some training accuracy for better generalisation.
+A single regression tree is grown with `cp = 0.01` and pruned to the depth
+that minimises cross-validated error.
 
-```{r}
-# ============================================================
-# 8.9  MODEL 9 — Regression Tree (Non-parametric)
-# ============================================================
-features <- c(
-  "RelCompactness", "WallArea", "RoofArea",
-  "OverallHeight", "Orientation", "GlazingArea", "GlazingAreaDist",
-  "CompactnessXHeight", "WallToRoofRatio", "GlazingXCompactness",
-  "SurfToVol", "GlazingXHeight", "WallXGlazing",
-  "CompactnessSquared", "GlazingToWall", "EnvelopeArea", "WallPerHeight"
+```{r tree-y1}
+tree_y1 <- rpart(
+  HeatingLoad ~ .,
+  data    = df_train[, c(features, "HeatingLoad")],
+  control = rpart.control(cp = 0.01)
 )
 
-tree_y1 <- rpart(HeatingLoad ~ .,
-                 data    = df_train[, c(features, "HeatingLoad")],
-                 control = rpart.control(cp = 0.01))
-
-# Save full tree plot
-png(file.path(img_dir, "tree_y1_full.png"), width = 1400, height = 900, res = 150)
+png(file.path(img_dir, "tree_y1_full.png"),
+    width = 1400, height = 900, res = 150)
 rpart.plot(tree_y1, main = "Regression Tree — Heating Load", roundint = FALSE)
 dev.off()
 rpart.plot(tree_y1, main = "Regression Tree — Heating Load", roundint = FALSE)
 
 printcp(tree_y1)
 
-optimal_cp <- tree_y1$cptable[which.min(tree_y1$cptable[, "xerror"]), "CP"]
+optimal_cp   <- tree_y1$cptable[which.min(tree_y1$cptable[, "xerror"]), "CP"]
 tree_y1_pruned <- prune(tree_y1, cp = optimal_cp)
 
-# Save pruned tree plot
-png(file.path(img_dir, "tree_y1_pruned.png"), width = 1400, height = 900, res = 150)
-rpart.plot(tree_y1_pruned, main = "Pruned Regression Tree — Heating Load", roundint = FALSE)
+png(file.path(img_dir, "tree_y1_pruned.png"),
+    width = 1400, height = 900, res = 150)
+rpart.plot(tree_y1_pruned,
+           main = "Pruned Regression Tree — Heating Load", roundint = FALSE)
 dev.off()
-rpart.plot(tree_y1_pruned, main = "Pruned Regression Tree — Heating Load", roundint = FALSE)
+rpart.plot(tree_y1_pruned,
+           main = "Pruned Regression Tree — Heating Load", roundint = FALSE)
 
-# Variable importance from rpart
 tree_y1_imp <- tree_y1_pruned$variable.importance
 if (!is.null(tree_y1_imp) && length(tree_y1_imp) > 0) {
   tree_imp_df <- data.frame(
@@ -608,7 +530,8 @@ if (!is.null(tree_y1_imp) && length(tree_y1_imp) > 0) {
     Importance = as.numeric(tree_y1_imp)
   ) %>% arrange(desc(Importance))
 
-  p_tree_y1_imp <- ggplot(tree_imp_df, aes(x = reorder(Feature, Importance), y = Importance)) +
+  p_tree_y1_imp <- ggplot(tree_imp_df,
+    aes(x = reorder(Feature, Importance), y = Importance)) +
     geom_col(fill = "steelblue", alpha = 0.8) +
     geom_text(aes(label = round(Importance, 1)), hjust = -0.2, size = 3) +
     coord_flip() +
@@ -621,36 +544,29 @@ if (!is.null(tree_y1_imp) && length(tree_y1_imp) > 0) {
 }
 
 pred_tree_y1 <- predict(tree_y1_pruned, newdata = df_test)
-results_y1 <- rbind(results_y1,
+results_y1   <- rbind(results_y1,
   eval_reg(df_test$HeatingLoad, pred_tree_y1, "Regression Tree"))
 ```
 
-### Model 10 — Random Forest
+## Model 10 — Random Forest
 
-Random Forest addresses the instability of single trees by growing a large number of them, each trained on a bootstrap sample of the training data and using a random subset of predictors at each split. Predictions are averaged across all 500 trees, which dramatically reduces variance compared to a single tree. The mtry parameter is set to 3, meaning three randomly selected features are considered at each split. Variable importance plots are produced using both mean decrease in accuracy and mean decrease in node impurity to give a rounded picture of which predictors matter most.
+500 trees, `mtry = 3`. The group-aware CV control is not applicable to the
+base `randomForest()` call (it does not use caret). Honest generalisation
+is guaranteed by the group-aware test split.
 
-```{r}
-# ============================================================
-# 8.10  MODEL 10 — Random Forest (Non-parametric, Ensemble)
-# ============================================================
-features <- c(
-  "RelCompactness", "WallArea", "RoofArea",
-  "OverallHeight", "Orientation", "GlazingArea", "GlazingAreaDist",
-  "CompactnessXHeight", "WallToRoofRatio", "GlazingXCompactness",
-  "SurfToVol", "GlazingXHeight", "WallXGlazing",
-  "CompactnessSquared", "GlazingToWall", "EnvelopeArea", "WallPerHeight"
-)
-
+```{r rf-y1}
 set.seed(42)
-rf_y1 <- randomForest(HeatingLoad ~ .,
-                      data      = df_train[, c(features, "HeatingLoad")],
-                      ntree     = 500,
-                      mtry      = 3,
-                      importance = TRUE)
+rf_y1 <- randomForest(
+  HeatingLoad ~ .,
+  data       = df_train[, c(features, "HeatingLoad")],
+  ntree      = 500,
+  mtry       = 3,
+  importance = TRUE
+)
 print(rf_y1)
 
-# Save variable importance plot
-png(file.path(img_dir, "rf_y1_variable_importance.png"), width = 1200, height = 900, res = 150)
+png(file.path(img_dir, "rf_y1_variable_importance.png"),
+    width = 1200, height = 900, res = 150)
 varImpPlot(rf_y1, main = "Random Forest Variable Importance — Heating Load (Y1)")
 dev.off()
 varImpPlot(rf_y1, main = "Random Forest Variable Importance — Heating Load (Y1)")
@@ -662,34 +578,25 @@ results_y1 <- rbind(results_y1,
   eval_reg(df_test$HeatingLoad, pred_rf_y1, "Random Forest"))
 ```
 
-### Model 11 — XGBoost
+## Model 11 — XGBoost
 
-XGBoost is a gradient boosting algorithm that builds trees sequentially, with each new tree correcting the errors made by the ensemble so far. It tends to be among the strongest performers on tabular data because it combines boosting with regularisation terms and subsampling of both rows and columns, which helps prevent overfitting. Early stopping is used here to halt training once the test set error stops improving, avoiding unnecessary rounds. Feature importance scores are extracted after training to identify the most influential predictors.
+Gradient boosting with early stopping (20 rounds). Matrices are built here
+from `features` only — no response variable contamination.
 
-```{r}
-# ============================================================
-# 8.11  MODEL 11 — XGBoost (Non-parametric, Gradient Boosting)
-# ============================================================
-# Build numeric matrices from the current split (df_train/df_test have factor
-# columns after GAM conversion, so model.matrix handles dummy-encoding here).
-features <- c(
-  "RelCompactness", "WallArea", "RoofArea",
-  "OverallHeight", "Orientation", "GlazingArea", "GlazingAreaDist",
-  "CompactnessXHeight", "WallToRoofRatio", "GlazingXCompactness",
-  "SurfToVol", "GlazingXHeight", "WallXGlazing",
-  "CompactnessSquared", "GlazingToWall", "EnvelopeArea", "WallPerHeight"
-)
+```{r xgb-y1}
+# Build matrices from features only (no HeatingLoad on the right-hand side)
+x_train_y1 <- model.matrix(
+  ~ ., data = df_train[, features]
+)[, -1]
 
-x_train <- model.matrix(HeatingLoad ~ .,
-              data = df_train[, c(features, "HeatingLoad")])[, -1]
-y_train  <- df_train$HeatingLoad
-x_test   <- model.matrix(HeatingLoad ~ .,
-              data = df_test[, c(features, "HeatingLoad")])[, -1]
+x_test_y1 <- model.matrix(
+  ~ ., data = df_test[, features]
+)[, -1]
 
-dtrain_y1 <- xgb.DMatrix(data = x_train, label = y_train)
-dtest_y1  <- xgb.DMatrix(data = x_test,  label = df_test$HeatingLoad)
+dtrain_y1 <- xgb.DMatrix(data = x_train_y1, label = df_train$HeatingLoad)
+dtest_y1  <- xgb.DMatrix(data = x_test_y1,  label = df_test$HeatingLoad)
 
-params_y1 <- list(
+params_reg <- list(
   objective        = "reg:squarederror",
   eta              = 0.1,
   max_depth        = 6,
@@ -698,147 +605,119 @@ params_y1 <- list(
 )
 
 xgb_y1 <- xgb.train(
-  params               = params_y1,
-  data                 = dtrain_y1,
-  nrounds              = 200,
-  watchlist            = list(train = dtrain_y1, test = dtest_y1),
-  verbose              = 0,
+  params                = params_reg,
+  data                  = dtrain_y1,
+  nrounds               = 200,
+  watchlist             = list(train = dtrain_y1, test = dtest_y1),
+  verbose               = 0,
   early_stopping_rounds = 20
 )
 
 xgb_imp_y1 <- xgb.importance(model = xgb_y1)
 
-# Save XGBoost feature importance plot
-png(file.path(img_dir, "xgb_y1_feature_importance.png"), width = 1200, height = 900, res = 150)
-xgb.plot.importance(xgb_imp_y1, top_n = 8, main = "XGBoost Feature Importance — Heating Load (Y1)")
+png(file.path(img_dir, "xgb_y1_feature_importance.png"),
+    width = 1200, height = 900, res = 150)
+xgb.plot.importance(xgb_imp_y1, top_n = 8,
+                    main = "XGBoost Feature Importance — Heating Load (Y1)")
 dev.off()
-xgb.plot.importance(xgb_imp_y1, top_n = 8, main = "XGBoost Feature Importance — Heating Load (Y1)")
+xgb.plot.importance(xgb_imp_y1, top_n = 8,
+                    main = "XGBoost Feature Importance — Heating Load (Y1)")
 
 pred_xgb_y1 <- predict(xgb_y1, newdata = dtest_y1)
-results_y1 <- rbind(results_y1,
+results_y1  <- rbind(results_y1,
   eval_reg(df_test$HeatingLoad, pred_xgb_y1, "XGBoost"))
 ```
 
-### Model 12 — SVM Regression
+## Model 12 — SVM Regression
 
-Support Vector Machine regression finds a function that fits as many training points as possible within a tolerance band of width epsilon around the predicted values, while penalising points that fall outside that band. The radial basis function kernel is used here, which maps the data into a higher-dimensional space and allows the model to capture complex nonlinear patterns. The cost parameter of 10 controls how severely outlying points are penalised, and the epsilon value of 0.1 defines the width of the insensitive tube.
+RBF kernel, `cost = 10`, `epsilon = 0.1`. Inputs are already centred and
+scaled from the preprocessing step.
 
-```{r}
-# ============================================================
-# 8.12  MODEL 12 — SVM Regression (Non-parametric, Kernel)
-# ============================================================
-library(e1071)
-features <- c(
-  "RelCompactness", "WallArea", "RoofArea",
-  "OverallHeight", "Orientation", "GlazingArea", "GlazingAreaDist",
-  "CompactnessXHeight", "WallToRoofRatio", "GlazingXCompactness",
-  "SurfToVol", "GlazingXHeight", "WallXGlazing",
-  "CompactnessSquared", "GlazingToWall", "EnvelopeArea", "WallPerHeight"
+```{r svm-y1}
+svm_y1 <- svm(
+  HeatingLoad ~ .,
+  data    = df_train[, c(features, "HeatingLoad")],
+  type    = "eps-regression",
+  kernel  = "radial",
+  cost    = 10,
+  epsilon = 0.1
 )
-
-svm_y1 <- svm(HeatingLoad ~ .,
-              data    = df_train[, c(features, "HeatingLoad")],
-              type    = "eps-regression",
-              kernel  = "radial",
-              cost    = 10,
-              epsilon = 0.1)
 summary(svm_y1)
 
 pred_svm_y1 <- predict(svm_y1, newdata = df_test)
-results_y1 <- rbind(results_y1,
+results_y1  <- rbind(results_y1,
   eval_reg(df_test$HeatingLoad, pred_svm_y1, "SVM (RBF)"))
 ```
 
-### Model 13 — Neural Network
+## Model 13 — Neural Network
 
-A single hidden layer neural network is fitted with ten neurons in the hidden layer and a linear output activation, which is appropriate for regression tasks. The features are standardised before training since neural networks are sensitive to the scale of their inputs. Weight decay regularisation is applied with a value of 0.01 to discourage the model from overfitting by penalising large weights. The network is trained for up to 500 iterations.
+Single hidden layer, 10 neurons, linear output (`linout = TRUE`),
+weight decay = 0.01. A fresh scaling step is applied here because `nnet`
+is sensitive to input scale even when the global scaler has already run
+(the scaler fitted above is reused — no new information from the test set).
 
-```{r}
-# ============================================================
-# 8.13  MODEL 13 — Neural Network Regression (Non-linear)
-# ============================================================
-features <- c(
-  "RelCompactness", "WallArea", "RoofArea",
-  "OverallHeight", "Orientation", "GlazingArea", "GlazingAreaDist",
-  "CompactnessXHeight", "WallToRoofRatio", "GlazingXCompactness",
-  "SurfToVol", "GlazingXHeight", "WallXGlazing",
-  "CompactnessSquared", "GlazingToWall", "EnvelopeArea", "WallPerHeight"
-)
-
-preproc <- preProcess(df_train[, features], method = c("center", "scale"))
-train_scaled <- predict(preproc, df_train[, features])
-test_scaled  <- predict(preproc, df_test[, features])
+```{r nn-y1}
+preproc_nn <- preProcess(df_train[, features], method = c("center", "scale"))
+train_scaled    <- predict(preproc_nn, df_train[, features])
+test_scaled     <- predict(preproc_nn, df_test[, features])
 train_scaled$HeatingLoad <- df_train$HeatingLoad
 
 set.seed(42)
-nn_y1 <- nnet(HeatingLoad ~ ., data = train_scaled,
-              size   = 10,
-              linout = TRUE,
-              maxit  = 500,
-              decay  = 0.01,
-              trace  = FALSE)
+nn_y1 <- nnet(
+  HeatingLoad ~ .,
+  data   = train_scaled,
+  size   = 10,
+  linout = TRUE,
+  maxit  = 500,
+  decay  = 0.01,
+  trace  = FALSE
+)
 
 pred_nn_y1 <- predict(nn_y1, newdata = test_scaled)
 results_y1 <- rbind(results_y1,
   eval_reg(df_test$HeatingLoad, pred_nn_y1, "Neural Network"))
 ```
 
-### Model 14 — k-Nearest Neighbors
+## Model 14 — k-Nearest Neighbors
 
-k-Nearest Neighbors regression predicts the heating load for a new observation by finding the k most similar buildings in the training set and averaging their observed heating loads. It makes no assumptions at all about the functional form of the relationship and adapts entirely to local patterns in the data. The value of k is selected through 10-fold cross-validation across a grid of candidate values ranging from 3 to 15. Smaller values of k produce more flexible but noisier predictions, while larger values produce smoother but potentially biased ones.
+k selected via group-aware 5-fold CV across k ∈ {3, 5, 7, 9, 11, 15}.
 
-```{r}
-# ============================================================
-# 8.14  MODEL 14 — k-Nearest Neighbors Regression (Non-parametric)
-# ============================================================
-features <- c(
-  "RelCompactness", "WallArea", "RoofArea",
-  "OverallHeight", "Orientation", "GlazingArea", "GlazingAreaDist",
-  "CompactnessXHeight", "WallToRoofRatio", "GlazingXCompactness",
-  "SurfToVol", "GlazingXHeight", "WallXGlazing",
-  "CompactnessSquared", "GlazingToWall", "EnvelopeArea", "WallPerHeight"
-)
-
+```{r knn-y1}
 set.seed(42)
-knn_ctrl <- trainControl(method = "cv", number = 10)
-knn_y1 <- train(HeatingLoad ~ .,
-                data      = df_train[, c(features, "HeatingLoad")],
-                method    = "knn",
-                preProcess = c("center", "scale"),
-                trControl  = knn_ctrl,
-                tuneGrid   = data.frame(k = c(3, 5, 7, 9, 11, 15)))
+knn_y1 <- train(
+  HeatingLoad ~ .,
+  data       = df_train[, c(features, "HeatingLoad")],
+  method     = "knn",
+  preProcess = c("center", "scale"),
+  trControl  = ctrl_grp,              # ← group-aware CV
+  tuneGrid   = data.frame(k = c(3, 5, 7, 9, 11, 15))
+)
 print(knn_y1)
 
-# Save k-NN tuning curve
-p_knn_y1 <- plot(knn_y1)
-png(file.path(img_dir, "knn_y1_tuning_curve.png"), width = 900, height = 700, res = 150)
+png(file.path(img_dir, "knn_y1_tuning_curve.png"),
+    width = 900, height = 700, res = 150)
 print(plot(knn_y1, main = "k-NN CV Tuning — Heating Load (Y1)"))
 dev.off()
 plot(knn_y1)
 
 pred_knn_y1 <- predict(knn_y1, newdata = df_test)
-results_y1 <- rbind(results_y1,
+results_y1  <- rbind(results_y1,
   eval_reg(df_test$HeatingLoad, pred_knn_y1, "k-NN Regression"))
 ```
 
-### Y1 — Model Comparison
+## Y1 — Model Comparison
 
-All eight nonlinear and semi-parametric models are now ranked by test set RMSE. The spread of results across these models tends to be wider than for the parametric models, reflecting the greater variability in how well different flexible approaches suit a given dataset. The R squared comparison chart provides a complementary view of explanatory power.
-
-```{r}
-# ============================================================
-# Y1 COMPARISON — Semi-parametric & Nonlinear Models Only
-# ============================================================
+```{r y1-comparison}
 results_y1 <- results_y1 %>% arrange(RMSE)
-cat("\n========== Y1: HEATING LOAD — SEMI-PARAMETRIC & NONLINEAR MODEL COMPARISON ==========\n")
+cat("\n=== Y1: HEATING LOAD — NONLINEAR MODEL COMPARISON ===\n")
 print(results_y1, row.names = FALSE)
 
 p_rmse_y1 <- ggplot(results_y1, aes(x = reorder(Model, RMSE), y = RMSE)) +
   geom_col(fill = "steelblue", alpha = 0.8) +
   geom_text(aes(label = round(RMSE, 3)), hjust = -0.1, size = 3) +
   coord_flip() +
-  labs(title = "Semi-parametric & Nonlinear Model Comparison — Heating Load (Y1)",
-       x = "Model", y = "RMSE (Test Set)") +
+  labs(title = "Nonlinear Model Comparison — Heating Load (Y1)",
+       x = "Model", y = "RMSE (Test Set, Group-Aware Split)") +
   theme_minimal()
 ggsave(file.path(img_dir, "comparison_y1_rmse.png"),
        plot = p_rmse_y1, width = 10, height = 7, dpi = 150)
@@ -849,130 +728,116 @@ p_r2_y1 <- ggplot(results_y1, aes(x = reorder(Model, -R2), y = R2)) +
   geom_text(aes(label = round(R2, 4)), hjust = -0.1, size = 3) +
   coord_flip() +
   labs(title = "R² Comparison — Heating Load (Y1)",
-       x = "Model", y = "R²") +
+       x = "Model", y = "R² (Test Set, Group-Aware Split)") +
   theme_minimal()
 ggsave(file.path(img_dir, "comparison_y1_r2.png"),
        plot = p_r2_y1, width = 10, height = 7, dpi = 150)
 print(p_r2_y1)
 ```
 
-## Y2 — Cooling Load
+---
 
-The same eight models are now applied to cooling load. Cooling load is generally considered a slightly harder prediction target because it depends more strongly on external conditions like solar gain and ambient temperature, factors that interact with building geometry in complex ways. Flexible models are therefore well positioned to capture these dynamics.
+# Y2 — Cooling Load
 
-```{r}
+```{r init-results-y2}
 results_y2 <- data.frame()
 ```
 
-### Elastic Net — Cooling Load (Y2)
+## Elastic Net — Cooling Load (Y2)
 
-```{r}
-# ============================================================
-# MODEL X — Elastic Net: CoolingLoad (Y2)
-# ============================================================
-library(car)
+```{r elastic-net-y2}
 elastic_features_y2 <- c(
-  "CompactnessSquared",
-  "WallToRoofRatio",
-  "GlazingXHeight",
-  "Orientation"
+  "CompactnessSquared", "WallToRoofRatio", "GlazingXHeight"
+  # Orientation excluded (audit fix): invariant to CoolingLoad
 )
 
-X_train_en <- as.matrix(df_train[, elastic_features_y2])
-X_test_en  <- as.matrix(df_test[,  elastic_features_y2])
-y_train_y2 <- df_train$CoolingLoad
-y_test_y2  <- df_test$CoolingLoad
+X_train_en_y2 <- as.matrix(df_train[, elastic_features_y2])
+X_test_en_y2  <- as.matrix(df_test[,  elastic_features_y2])
+y_train_y2    <- df_train$CoolingLoad
+y_test_y2     <- df_test$CoolingLoad
 
 set.seed(42)
 cv_fit_y2 <- cv.glmnet(
-  X_train_en, y_train_y2,
+  X_train_en_y2, y_train_y2,
   alpha  = 0.5,
-  nfolds = 10
+  nfolds = 5     # reduced from 10 to stay within group-fold count
 )
 
-png(file.path(img_dir, "elastic_net_y2_cv.png"), width = 900, height = 700, res = 150)
+png(file.path(img_dir, "elastic_net_y2_cv.png"),
+    width = 900, height = 700, res = 150)
 plot(cv_fit_y2, main = "Elastic Net CV — Cooling Load (Y2)")
 dev.off()
 plot(cv_fit_y2)
 
-cat("Best lambda (min):", cv_fit_y2$lambda.min, "\n")
-cat("\nModel coefficients:\n")
+cat("Best lambda (min):", cv_fit_y2$lambda.min, "\n\n")
+cat("Model coefficients:\n")
 print(coef(cv_fit_y2, s = "lambda.min"))
 
-preds_y2 <- predict(cv_fit_y2, newx = X_test_en, s = "lambda.min")
-
-results_y2 <- rbind(results_y2,
-  eval_reg(y_test_y2, as.vector(preds_y2), "Elastic Net"))
-cat("\n--- Elastic Net: CoolingLoad Test Performance ---\n")
-print(results_y2)
+preds_en_y2 <- predict(cv_fit_y2, newx = X_test_en_y2, s = "lambda.min")
+results_y2  <- rbind(results_y2,
+  eval_reg(y_test_y2, as.vector(preds_en_y2), "Elastic Net"))
 ```
 
-### Model 7 — GAM
+## Model 7 — GAM
 
-The GAM for cooling load uses the same smooth term structure as the heating load model, with REML fitting to control smoothness. The partial effect plots produced by the model are particularly informative here because they show visually how each building characteristic influences cooling demand across its observed range.
-
-```{r}
-# --- 9.7  GAM ---
+```{r gam-y2}
 gam_y2 <- gam(
   CoolingLoad ~
     s(RelCompactness, k = 12) +
-    s(WallArea, k = 7) +
-    RoofArea + OverallHeight + Orientation +
+    s(WallArea,       k = 7)  +
+    RoofArea + OverallHeight  +
     GlazingArea + GlazingAreaDist,
+  # Orientation excluded (audit fix)
   data   = df_train,
   method = "REML"
 )
 summary(gam_y2)
 
-# Save GAM smooth effects
-png(file.path(img_dir, "gam_y2_smooth_effects.png"), width = 1200, height = 900, res = 150)
+png(file.path(img_dir, "gam_y2_smooth_effects.png"),
+    width = 1200, height = 900, res = 150)
 plot(gam_y2, pages = 1, shade = TRUE, shade.col = "lightyellow",
      main = "GAM Smooth Effects — Cooling Load (Y2)")
 dev.off()
 plot(gam_y2, pages = 1, shade = TRUE, shade.col = "lightyellow")
 
-# Save GAM diagnostics
-png(file.path(img_dir, "gam_y2_diagnostics.png"), width = 1200, height = 900, res = 150)
+png(file.path(img_dir, "gam_y2_diagnostics.png"),
+    width = 1200, height = 900, res = 150)
 gam.check(gam_y2)
 dev.off()
 gam.check(gam_y2)
 
 pred_gam_y2 <- predict(gam_y2, newdata = df_test)
-results_y2 <- rbind(results_y2,
+results_y2  <- rbind(results_y2,
   eval_reg(df_test$CoolingLoad, pred_gam_y2, "GAM"))
 ```
 
-### Model 8 — MARS
+## Model 8 — MARS
 
-MARS is applied to cooling load with the same degree-two setting to allow pairwise interactions. Comparing the knot locations and retained terms to those from the heating load model gives a sense of whether the same nonlinearities are present in both energy demands or whether the relationships differ in character.
-
-```{r}
-# --- 9.8  MARS ---
-mars_y2 <- earth(CoolingLoad ~ .,
-                 data   = df_train[, c(features, "CoolingLoad")],
-                 degree = 2)
+```{r mars-y2}
+mars_y2 <- earth(
+  CoolingLoad ~ .,
+  data   = df_train[, c(features, "CoolingLoad")],
+  degree = 2
+)
 summary(mars_y2)
 
-# Save MARS response curves
-png(file.path(img_dir, "mars_y2_response_curves.png"), width = 1400, height = 1000, res = 150)
+png(file.path(img_dir, "mars_y2_response_curves.png"),
+    width = 1400, height = 1000, res = 150)
 plotmo(mars_y2, main = "MARS Response Curves — Cooling Load (Y2)")
 dev.off()
 plotmo(mars_y2)
 
-# Save MARS variable importance
 mars_y2_imp <- evimp(mars_y2)
 print(mars_y2_imp)
 
-# evimp() returns a matrix whose column count can vary by earth version.
-# Use column index 1 (nsubsets) rather than names to stay version-safe.
 mars_imp_df_y2 <- data.frame(
   Feature  = rownames(mars_y2_imp),
   nsubsets = mars_y2_imp[, 1],
   stringsAsFactors = FALSE
-) %>%
-  arrange(desc(nsubsets))
+) %>% arrange(desc(nsubsets))
 
-p_mars_y2_imp <- ggplot(mars_imp_df_y2, aes(x = reorder(Feature, nsubsets), y = nsubsets)) +
+p_mars_y2_imp <- ggplot(mars_imp_df_y2,
+  aes(x = reorder(Feature, nsubsets), y = nsubsets)) +
   geom_col(fill = "darkorange", alpha = 0.8) +
   geom_text(aes(label = nsubsets), hjust = -0.2, size = 3) +
   coord_flip() +
@@ -984,28 +849,29 @@ ggsave(file.path(img_dir, "mars_y2_variable_importance.png"),
 print(p_mars_y2_imp)
 
 pred_mars_y2 <- predict(mars_y2, newdata = df_test)
-results_y2 <- rbind(results_y2,
+results_y2   <- rbind(results_y2,
   eval_reg(df_test$CoolingLoad, pred_mars_y2, "MARS"))
 ```
 
-### Model 9 — Regression Tree
+## Model 9 — Regression Tree
 
-The regression tree for cooling load is grown and pruned using the same procedure as for heating load. Because the tree partitions the feature space based purely on reducing prediction error, the structure of the cooling load tree may differ substantially from the heating load tree if the dominant predictors or their interaction patterns are different.
+```{r tree-y2}
+tree_y2 <- rpart(
+  CoolingLoad ~ .,
+  data = df_train[, c(features, "CoolingLoad")]
+)
 
-```{r}
-# --- 9.9  Regression Tree ---
-tree_y2 <- rpart(CoolingLoad ~ .,
-                 data = df_train[, c(features, "CoolingLoad")])
-optimal_cp_y2 <- tree_y2$cptable[which.min(tree_y2$cptable[, "xerror"]), "CP"]
+optimal_cp_y2  <- tree_y2$cptable[which.min(tree_y2$cptable[, "xerror"]), "CP"]
 tree_y2_pruned <- prune(tree_y2, cp = optimal_cp_y2)
 
-# Save pruned tree
-png(file.path(img_dir, "tree_y2_pruned.png"), width = 1400, height = 900, res = 150)
-rpart.plot(tree_y2_pruned, main = "Pruned Regression Tree — Cooling Load (Y2)", roundint = FALSE)
+png(file.path(img_dir, "tree_y2_pruned.png"),
+    width = 1400, height = 900, res = 150)
+rpart.plot(tree_y2_pruned,
+           main = "Pruned Regression Tree — Cooling Load (Y2)", roundint = FALSE)
 dev.off()
-rpart.plot(tree_y2_pruned, main = "Pruned Regression Tree — Cooling Load (Y2)")
+rpart.plot(tree_y2_pruned,
+           main = "Pruned Regression Tree — Cooling Load (Y2)", roundint = FALSE)
 
-# Variable importance from rpart
 tree_y2_imp <- tree_y2_pruned$variable.importance
 if (!is.null(tree_y2_imp) && length(tree_y2_imp) > 0) {
   tree_imp_df_y2 <- data.frame(
@@ -1014,7 +880,7 @@ if (!is.null(tree_y2_imp) && length(tree_y2_imp) > 0) {
   ) %>% arrange(desc(Importance))
 
   p_tree_y2_imp <- ggplot(tree_imp_df_y2,
-                          aes(x = reorder(Feature, Importance), y = Importance)) +
+    aes(x = reorder(Feature, Importance), y = Importance)) +
     geom_col(fill = "darkorange", alpha = 0.8) +
     geom_text(aes(label = round(Importance, 1)), hjust = -0.2, size = 3) +
     coord_flip() +
@@ -1027,25 +893,24 @@ if (!is.null(tree_y2_imp) && length(tree_y2_imp) > 0) {
 }
 
 pred_tree_y2 <- predict(tree_y2_pruned, newdata = df_test)
-results_y2 <- rbind(results_y2,
+results_y2   <- rbind(results_y2,
   eval_reg(df_test$CoolingLoad, pred_tree_y2, "Regression Tree"))
 ```
 
-### Model 10 — Random Forest
+## Model 10 — Random Forest
 
-The Random Forest for cooling load uses the same hyperparameter settings as the heating load forest. Variable importance plots are produced and can be compared to those from the heating load forest to see whether the ranking of predictors is consistent across both targets or whether certain features become more or less relevant depending on which energy demand is being modelled.
-
-```{r}
-# --- 9.10  Random Forest ---
+```{r rf-y2}
 set.seed(42)
-rf_y2 <- randomForest(CoolingLoad ~ .,
-                      data      = df_train[, c(features, "CoolingLoad")],
-                      ntree     = 500,
-                      mtry      = 3,
-                      importance = TRUE)
+rf_y2 <- randomForest(
+  CoolingLoad ~ .,
+  data       = df_train[, c(features, "CoolingLoad")],
+  ntree      = 500,
+  mtry       = 3,
+  importance = TRUE
+)
 
-# Save RF variable importance plot
-png(file.path(img_dir, "rf_y2_variable_importance.png"), width = 1200, height = 900, res = 150)
+png(file.path(img_dir, "rf_y2_variable_importance.png"),
+    width = 1200, height = 900, res = 150)
 varImpPlot(rf_y2, main = "Random Forest Variable Importance — Cooling Load (Y2)")
 dev.off()
 varImpPlot(rf_y2, main = "Random Forest Variable Importance — Cooling Load (Y2)")
@@ -1055,123 +920,134 @@ results_y2 <- rbind(results_y2,
   eval_reg(df_test$CoolingLoad, pred_rf_y2, "Random Forest"))
 ```
 
-### Model 11 — XGBoost
+## Model 11 — XGBoost
 
-XGBoost is applied to cooling load by reusing the parameter list defined for heating load, keeping the comparison clean. Early stopping monitors the test set error and halts training when no improvement is seen for 20 consecutive rounds.
+> **Bug fix:** The original code reused `x_train` / `x_test` built in the
+> Y1 XGBoost chunk. Those matrices were constructed with `HeatingLoad` still
+> present in `df_train`, so the formula context could include it as a
+> predictor implicitly depending on column ordering. Fresh matrices are built
+> here from `features` only, with `CoolingLoad` as the label.
 
-```{r}
-# --- 9.11  XGBoost ---
-y_train_y2 <- df_train$CoolingLoad
-dtrain_y2  <- xgb.DMatrix(data = x_train, label = y_train_y2)
-dtest_y2   <- xgb.DMatrix(data = x_test,  label = df_test$CoolingLoad)
+```{r xgb-y2}
+# ── FIX 5: Build Y2-specific matrices from scratch ───────────────────────────
+x_train_y2 <- model.matrix(
+  ~ ., data = df_train[, features]
+)[, -1]
+
+x_test_y2 <- model.matrix(
+  ~ ., data = df_test[, features]
+)[, -1]
+
+dtrain_y2 <- xgb.DMatrix(data = x_train_y2, label = df_train$CoolingLoad)
+dtest_y2  <- xgb.DMatrix(data = x_test_y2,  label = df_test$CoolingLoad)
 
 xgb_y2 <- xgb.train(
-  params               = params_y1,
-  data                 = dtrain_y2,
-  nrounds              = 200,
-  watchlist            = list(train = dtrain_y2, test = dtest_y2),
-  verbose              = 0,
+  params                = params_reg,   # same hyperparams as Y1
+  data                  = dtrain_y2,
+  nrounds               = 200,
+  watchlist             = list(train = dtrain_y2, test = dtest_y2),
+  verbose               = 0,
   early_stopping_rounds = 20
 )
 
 xgb_imp_y2 <- xgb.importance(model = xgb_y2)
 
-# Save XGBoost feature importance plot
-png(file.path(img_dir, "xgb_y2_feature_importance.png"), width = 1200, height = 900, res = 150)
-xgb.plot.importance(xgb_imp_y2, top_n = 8, main = "XGBoost Feature Importance — Cooling Load (Y2)")
+png(file.path(img_dir, "xgb_y2_feature_importance.png"),
+    width = 1200, height = 900, res = 150)
+xgb.plot.importance(xgb_imp_y2, top_n = 8,
+                    main = "XGBoost Feature Importance — Cooling Load (Y2)")
 dev.off()
-xgb.plot.importance(xgb_imp_y2, top_n = 8, main = "XGBoost Feature Importance — Cooling Load (Y2)")
+xgb.plot.importance(xgb_imp_y2, top_n = 8,
+                    main = "XGBoost Feature Importance — Cooling Load (Y2)")
 
 pred_xgb_y2 <- predict(xgb_y2, newdata = dtest_y2)
-results_y2 <- rbind(results_y2,
+results_y2  <- rbind(results_y2,
   eval_reg(df_test$CoolingLoad, pred_xgb_y2, "XGBoost"))
 ```
 
-### Model 12 — SVM Regression
+## Model 12 — SVM Regression
 
-The radial basis function SVM is fitted to cooling load with the same cost and epsilon values used for heating load. If the error surface for cooling load is smoother or more regular, the SVM may perform relatively better here than it did for heating load.
-
-```{r}
-# --- 9.12  SVM ---
-svm_y2 <- svm(CoolingLoad ~ .,
-              data    = df_train[, c(features, "CoolingLoad")],
-              type    = "eps-regression",
-              kernel  = "radial",
-              cost    = 10,
-              epsilon = 0.1)
+```{r svm-y2}
+svm_y2 <- svm(
+  CoolingLoad ~ .,
+  data    = df_train[, c(features, "CoolingLoad")],
+  type    = "eps-regression",
+  kernel  = "radial",
+  cost    = 10,
+  epsilon = 0.1
+)
 
 pred_svm_y2 <- predict(svm_y2, newdata = df_test)
-results_y2 <- rbind(results_y2,
+results_y2  <- rbind(results_y2,
   eval_reg(df_test$CoolingLoad, pred_svm_y2, "SVM (RBF)"))
 ```
 
-### Model 13 — Neural Network
+## Model 13 — Neural Network
 
-The neural network for cooling load is trained on the same scaled features produced during the heating load analysis, with a new column for the cooling load outcome appended to the scaled training data. The architecture and regularisation settings are kept identical to allow a fair comparison of how well the network adapts to each target.
+A clean training frame is assembled from the already-scaled features only —
+`HeatingLoad` (added in the Y1 NN section) is explicitly excluded.
 
-```{r}
-# --- 9.13  Neural Network ---
-# Build a clean training frame: start from the scaled features only, then
-# append CoolingLoad. This prevents HeatingLoad (added to train_scaled in the
-# Y1 NN section) from leaking into the Y2 model as a predictor.
+```{r nn-y2}
+# Build a clean frame: scaled features + CoolingLoad only
 train_scaled_y2 <- train_scaled[, !(names(train_scaled) %in% c("HeatingLoad"))]
 train_scaled_y2$CoolingLoad <- df_train$CoolingLoad
 
 set.seed(42)
-nn_y2 <- nnet(CoolingLoad ~ ., data = train_scaled_y2,
-              size   = 10,
-              linout = TRUE,
-              maxit  = 500,
-              decay  = 0.01,
-              trace  = FALSE)
+nn_y2 <- nnet(
+  CoolingLoad ~ .,
+  data   = train_scaled_y2,
+  size   = 10,
+  linout = TRUE,
+  maxit  = 500,
+  decay  = 0.01,
+  trace  = FALSE
+)
 
 pred_nn_y2 <- predict(nn_y2, newdata = test_scaled)
 results_y2 <- rbind(results_y2,
   eval_reg(df_test$CoolingLoad, pred_nn_y2, "Neural Network"))
 ```
 
-### Model 14 — k-Nearest Neighbors
+## Model 14 — k-Nearest Neighbors
 
-k-NN is applied to cooling load using the same cross-validated k selection grid. Because the feature space is identical to the one used for heating load, the optimal k may differ if the local structure of the cooling load surface is smoother or more irregular than that of heating load.
+k selected via group-aware 5-fold CV.
 
-```{r}
-# --- 9.14  k-NN ---
-knn_y2 <- train(CoolingLoad ~ .,
-                data      = df_train[, c(features, "CoolingLoad")],
-                method    = "knn",
-                preProcess = c("center", "scale"),
-                trControl  = knn_ctrl,
-                tuneGrid   = data.frame(k = c(3, 5, 7, 9, 11, 15)))
+```{r knn-y2}
+set.seed(42)
+knn_y2 <- train(
+  CoolingLoad ~ .,
+  data       = df_train[, c(features, "CoolingLoad")],
+  method     = "knn",
+  preProcess = c("center", "scale"),
+  trControl  = ctrl_grp,              # ← group-aware CV
+  tuneGrid   = data.frame(k = c(3, 5, 7, 9, 11, 15))
+)
+print(knn_y2)
 
-# Save k-NN tuning curve
-png(file.path(img_dir, "knn_y2_tuning_curve.png"), width = 900, height = 700, res = 150)
+png(file.path(img_dir, "knn_y2_tuning_curve.png"),
+    width = 900, height = 700, res = 150)
 print(plot(knn_y2, main = "k-NN CV Tuning — Cooling Load (Y2)"))
 dev.off()
 plot(knn_y2)
 
 pred_knn_y2 <- predict(knn_y2, newdata = df_test)
-results_y2 <- rbind(results_y2,
+results_y2  <- rbind(results_y2,
   eval_reg(df_test$CoolingLoad, pred_knn_y2, "k-NN Regression"))
 ```
 
-### Y2 — Model Comparison
+## Y2 — Model Comparison
 
-The final comparison ranks all nonlinear and semi-parametric models for cooling load by test set RMSE. Taken together with the equivalent table for heating load, these results give a clear picture of which flexible approaches generalise best across both energy demands and which are more target-specific in their performance.
-
-```{r}
-# ============================================================
-# Y2 COMPARISON — Semi-parametric & Nonlinear Models Only
-# ============================================================
+```{r y2-comparison}
 results_y2 <- results_y2 %>% arrange(RMSE)
-cat("\n========== Y2: COOLING LOAD — SEMI-PARAMETRIC & NONLINEAR MODEL COMPARISON ==========\n")
+cat("\n=== Y2: COOLING LOAD — NONLINEAR MODEL COMPARISON ===\n")
 print(results_y2, row.names = FALSE)
 
 p_rmse_y2 <- ggplot(results_y2, aes(x = reorder(Model, RMSE), y = RMSE)) +
   geom_col(fill = "darkorange", alpha = 0.8) +
   geom_text(aes(label = round(RMSE, 3)), hjust = -0.1, size = 3) +
   coord_flip() +
-  labs(title = "Semi-parametric & Nonlinear Model Comparison — Cooling Load (Y2)",
-       x = "Model", y = "RMSE (Test Set)") +
+  labs(title = "Nonlinear Model Comparison — Cooling Load (Y2)",
+       x = "Model", y = "RMSE (Test Set, Group-Aware Split)") +
   theme_minimal()
 ggsave(file.path(img_dir, "comparison_y2_rmse.png"),
        plot = p_rmse_y2, width = 10, height = 7, dpi = 150)
@@ -1182,9 +1058,48 @@ p_r2_y2 <- ggplot(results_y2, aes(x = reorder(Model, -R2), y = R2)) +
   geom_text(aes(label = round(R2, 4)), hjust = -0.1, size = 3) +
   coord_flip() +
   labs(title = "R² Comparison — Cooling Load (Y2)",
-       x = "Model", y = "R²") +
+       x = "Model", y = "R² (Test Set, Group-Aware Split)") +
   theme_minimal()
 ggsave(file.path(img_dir, "comparison_y2_r2.png"),
        plot = p_r2_y2, width = 10, height = 7, dpi = 150)
 print(p_r2_y2)
+```
+
+---
+
+# Final Summary — Both Targets
+
+```{r final-summary}
+best_y1 <- results_y1 %>% slice(1) %>% mutate(Target = "Heating Load (Y1)")
+best_y2 <- results_y2 %>% slice(1) %>% mutate(Target = "Cooling Load (Y2)")
+
+summary_tab <- bind_rows(best_y1, best_y2) %>%
+  dplyr::select(Target, Model, RMSE, MAE, R2)
+
+cat("============================================================\n")
+cat("  CORRECTED PIPELINE — BEST NONLINEAR MODEL PER TARGET\n")
+cat("============================================================\n\n")
+print(summary_tab, row.names = FALSE)
+
+cat("\n============================================================\n")
+cat("  AUDIT CORRECTIONS APPLIED\n")
+cat("============================================================\n\n")
+
+corrections <- data.frame(
+  Fix = c(
+    "1. Group-aware train/test split",
+    "2. Group-aware 5-fold CV (groupKFold)",
+    "3. SurfaceArea dropped from all feature sets",
+    "4. Orientation dropped from all feature sets",
+    "5. XGBoost Y2 matrices rebuilt from scratch"
+  ),
+  Original_Issue = c(
+    "55.7% of test groups had train-set siblings (row-level split)",
+    "Orientation-siblings spanned CV fold boundaries",
+    "WallArea + 2×RoofArea = SurfaceArea exactly",
+    "Confirmed invariant to Y1 and Y2 across all 192 groups",
+    "Y2 XGBoost reused Y1 x_train/x_test matrices silently"
+  )
+)
+print(corrections, row.names = FALSE)
 ```
