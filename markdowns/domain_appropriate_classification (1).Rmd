@@ -1,0 +1,1299 @@
+---
+title: "Final Project — Domain-Appropriate Models for Building Energy Classification"
+author: "Group 5"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    number_sections: true
+  pdf_document:
+    toc: true
+---
+
+```{r packages, message=FALSE, warning=FALSE}
+pkgs <- c(
+  "tidyverse", "caret", "readxl", "ggplot2", "dplyr",
+  "ordinalForest",  # Ordinal Random Forest
+  "naivebayes",     # Naive Bayes with Gaussian distributions
+  "pROC",           # Multiclass AUC
+  "knitr"           # Table formatting
+)
+
+lapply(pkgs, library, character.only = TRUE)
+```
+
+```{r setup-image-dir}
+img_dir <- "/home/jakes/Documents/strathmore/Modules/Module 3/linear_models/classwork/final_project/markdowns/images/domainClassification"
+dir.create(img_dir, showWarnings = FALSE, recursive = TRUE)
+```
+
+---
+
+# Why These Models?
+
+The classification file in the main nonlinear analysis assigned each building
+to one of three energy load classes — Low, Medium, or High — and evaluated
+models on accuracy and AUC. Those are reasonable general metrics, but they
+treat all misclassifications as equally bad. In reality, predicting "High"
+when the true class is "Low" is a much more serious mistake than predicting
+"Medium" when the true class is "Low". A building engineer or policy maker
+relying on the model would make very different decisions in each case.
+
+This is a property of the problem that none of the general-purpose classifiers
+in the main file account for. The three models introduced here are chosen
+specifically because they engage with this structure:
+
+- **The Standards-Based Classifier** does not learn from data at all. It
+  classifies buildings using the energy performance thresholds defined by the
+  EU Energy Performance of Buildings Directive — the same thresholds that
+  building regulators actually use. This gives us a domain baseline: how
+  well does the rule a practitioner would apply compare to a machine learning
+  model trained on 616 buildings?
+
+- **The Ordinal Random Forest** is a version of Random Forest that explicitly
+  knows the classes are ordered. It is trained on a loss function that
+  penalises large-order misclassifications more severely than small ones,
+  so it learns to avoid the worst mistakes rather than just maximising
+  overall accuracy.
+
+- **Gaussian Naive Bayes with Physical Priors** is a probabilistic classifier
+  whose feature distributions are partially informed by what the heat transfer
+  equation tells us each energy class should look like, rather than estimated
+  purely from the training data. It is not the strongest predictor, but it
+  makes its assumptions explicit and interpretable in physical terms.
+
+---
+
+# Load Data
+
+```{r load-data}
+df <- read_excel(
+  "~/Documents/strathmore/Modules/Module 3/linear_models/classwork/final_project/markdowns/new_data/ENB2012_post_EDA.xlsx"
+)
+
+cat("Rows:", nrow(df), "\n")
+cat("Columns:", paste(names(df), collapse = ", "), "\n")
+```
+
+---
+
+# Restore Factor Variables
+
+```{r restore-factors}
+df$Orientation_f <- factor(df$Orientation, levels = 2:5,
+                            labels = c("N", "E", "S", "W"))
+
+df$OverallHeight_f <- factor(df$OverallHeight, levels = c(3.5, 7.0),
+                              labels = c("Low_3.5m", "High_7m"))
+
+df$GlazingArea_f <- factor(df$GlazingArea, levels = c(0, 0.1, 0.25, 0.4),
+                            labels = c("None", "Low_10pct", "Med_25pct",
+                                       "High_40pct"))
+
+df$GlazingAreaDist_f <- factor(df$GlazingAreaDist, levels = 0:5,
+                                labels = c("None", "Uniform", "N_heavy",
+                                           "E_heavy", "S_heavy", "W_heavy"))
+
+cat("Factor levels confirmed.\n")
+```
+
+---
+
+# Feature Engineering
+
+We reproduce the same physically motivated engineered features used throughout
+the project. These are all products, ratios, or squares of the original
+building geometry variables that correspond to quantities that appear in heat
+transfer calculations. None use the target variable, so building them before
+the train/test split is safe.
+
+```{r feature-engineering}
+df_clean <- df %>%
+  mutate(
+    CompactnessXHeight  = RelCompactness * OverallHeight,
+    WallToRoofRatio     = WallArea / RoofArea,
+    GlazingXCompactness = GlazingArea * RelCompactness,
+    SurfToVol           = SurfaceArea / (WallArea + RoofArea),
+    GlazingXHeight      = GlazingArea * OverallHeight,
+    WallXGlazing        = WallArea * GlazingArea,
+    CompactnessSquared  = RelCompactness^2,
+    HeightSquared       = OverallHeight^2,
+    GlazingToWall       = GlazingArea / (WallArea + 1),
+    EnvelopeArea        = WallArea + RoofArea,
+    WallPerHeight       = WallArea / (OverallHeight + 1)
+  )
+
+cat("Feature engineering complete. Total columns:", ncol(df_clean), "\n")
+```
+
+---
+
+# Constructing the Classification Target
+
+The classification target is built by splitting HeatingLoad and CoolingLoad
+into three equal-sized groups using tertile boundaries. Each building is
+labelled Low, Medium, or High based on which third of the load distribution
+it falls into.
+
+It is worth noting that the tertile boundaries for this dataset land very
+close to the EU Energy Performance of Buildings Directive thresholds for
+residential heating:
+
+- The Low/Medium boundary falls at approximately 14.5 kWh/m², which is
+  almost exactly the EU's Class A/B threshold of 15 kWh/m².
+- The Medium/High boundary falls at approximately 28.6 kWh/m², close to
+  the EU's Class B/C threshold of 30 kWh/m².
+
+This near-alignment is not a coincidence — EnergyPlus was designed to
+simulate realistic building performance ranges, and those ranges naturally
+span the same territory that energy standards were written to cover. It
+means our three classes are not arbitrary statistical buckets; they have a
+genuine physical and regulatory interpretation. This is precisely what makes
+the standards-based classifier a meaningful comparison rather than a
+trivial one.
+
+```{r build-classes}
+# Tertile boundaries computed from the full dataset before splitting
+hl_breaks <- quantile(df_clean$HeatingLoad, probs = c(0, 1/3, 2/3, 1))
+cl_breaks <- quantile(df_clean$CoolingLoad, probs = c(0, 1/3, 2/3, 1))
+
+df_clean <- df_clean %>%
+  mutate(
+    HL_class = cut(HeatingLoad,
+                   breaks         = hl_breaks,
+                   labels         = c("Low", "Medium", "High"),
+                   include.lowest = TRUE),
+    CL_class = cut(CoolingLoad,
+                   breaks         = cl_breaks,
+                   labels         = c("Low", "Medium", "High"),
+                   include.lowest = TRUE),
+    # Ordered factors — critical for the ordinal models
+    HL_class_ord = factor(HL_class,
+                          levels  = c("Low", "Medium", "High"),
+                          ordered = TRUE),
+    CL_class_ord = factor(CL_class,
+                          levels  = c("Low", "Medium", "High"),
+                          ordered = TRUE)
+  )
+
+cat("HeatingLoad tertile boundaries:\n")
+cat(sprintf("  Low / Medium boundary : %.2f kWh/m²\n", hl_breaks[2]))
+cat(sprintf("  Medium / High boundary: %.2f kWh/m²\n", hl_breaks[3]))
+cat(sprintf("  (EU A/B threshold: 15 kWh/m²,  EU B/C threshold: 30 kWh/m²)\n\n"))
+
+cat("Class distribution — Heating Load:\n")
+print(table(df_clean$HL_class))
+cat("\nClass distribution — Cooling Load:\n")
+print(table(df_clean$CL_class))
+```
+
+---
+
+# Group Key and Train/Test Split
+
+The same group-aware split used throughout the project. All four orientation
+variants of each building configuration go entirely to training or entirely
+to test, preventing the model from recognising a building it has already
+seen under a different compass direction.
+
+```{r split}
+df_clean <- df_clean %>%
+  mutate(
+    group_key = paste(RelCompactness, WallArea, RoofArea,
+                      OverallHeight, GlazingArea, GlazingAreaDist, sep = "_")
+  )
+
+set.seed(42)
+unique_groups  <- unique(df_clean$group_key)
+n_train_groups <- round(0.80 * length(unique_groups))
+train_groups   <- sample(unique_groups, n_train_groups)
+
+df_train <- df_clean %>% filter( group_key %in% train_groups)
+df_test  <- df_clean %>% filter(!group_key %in% train_groups)
+
+group_overlap <- length(intersect(df_train$group_key, df_test$group_key))
+cat("Training rows :", nrow(df_train), "\n")
+cat("Test rows     :", nrow(df_test),  "\n")
+cat("Group overlap :", group_overlap,
+    ifelse(group_overlap == 0, "  <- zero leakage confirmed\n",
+                               "  <- WARNING: leakage present\n"))
+```
+
+---
+
+# Feature Set and Scaling
+
+SurfaceArea and Orientation are excluded for the same reasons established
+in the main nonlinear file. Scaling is fitted on training data only.
+
+```{r features-and-scaling}
+features <- c(
+  "RelCompactness", "WallArea", "RoofArea",
+  "OverallHeight", "GlazingArea", "GlazingAreaDist",
+  "CompactnessXHeight", "WallToRoofRatio", "GlazingXCompactness",
+  "SurfToVol", "GlazingXHeight", "WallXGlazing",
+  "CompactnessSquared", "GlazingToWall", "EnvelopeArea", "WallPerHeight"
+)
+
+scale_cols <- features
+
+preproc_params <- caret::preProcess(
+  df_train[, scale_cols],
+  method = c("center", "scale")
+)
+
+df_train[, scale_cols] <- predict(preproc_params, df_train[, scale_cols])
+df_test[, scale_cols]  <- predict(preproc_params, df_test[, scale_cols])
+
+cat("Scaling complete. Fitted on training set only.\n")
+cat("Feature count:", length(features), "\n")
+```
+
+---
+
+# Build Model Datasets
+
+We assemble the training and test frames that each model will use. We need
+both the unordered factor version (for Naive Bayes and metric calculation)
+and the ordered factor version (for the Ordinal Random Forest).
+
+```{r model-datasets}
+# Heating Load — unordered (for NB, metrics)
+train_HL <- df_train[, c(features, "HL_class")]
+test_HL  <- df_test[,  c(features, "HL_class")]
+
+# Heating Load — ordered (for Ordinal Forest)
+train_HL_ord <- df_train[, c(features, "HL_class_ord")]
+test_HL_ord  <- df_test[,  c(features, "HL_class_ord")]
+
+# Cooling Load — unordered
+train_CL <- df_train[, c(features, "CL_class")]
+test_CL  <- df_test[,  c(features, "CL_class")]
+
+# Cooling Load — ordered
+train_CL_ord <- df_train[, c(features, "CL_class_ord")]
+test_CL_ord  <- df_test[,  c(features, "CL_class_ord")]
+
+cat("Heating Load class distribution in training set:\n")
+print(table(train_HL$HL_class))
+cat("\nCooling Load class distribution in training set:\n")
+print(table(train_CL$CL_class))
+```
+
+---
+
+# Evaluation Helpers
+
+We use three metrics throughout this file. Accuracy counts the proportion
+of buildings classified into the correct energy class. The Ranked Probability
+Score (RPS) is an ordinal-aware metric that penalises large-order errors more
+than small ones — it is the natural companion to the ordinal modelling
+approach. Multiclass AUC (one-vs-rest, macro-averaged) measures how well
+each model separates the three classes in probability space.
+
+```{r eval-helpers}
+# Standard classification metrics
+eval_clf <- function(actual, predicted, model_name) {
+  acc <- mean(actual == predicted)
+  cm  <- table(Actual = actual, Predicted = predicted)
+  cat(sprintf("%-35s  Accuracy = %.4f\n", model_name, acc))
+  list(model_name = model_name, accuracy = acc, confusion = cm)
+}
+
+# Ranked Probability Score for ordinal predictions
+# Takes a matrix of class probabilities (columns = Low, Medium, High in order)
+ranked_prob_score <- function(prob_matrix, actual_ordered) {
+  classes <- levels(actual_ordered)
+  k <- length(classes)
+  n <- length(actual_ordered)
+
+  rps_vals <- sapply(seq_len(n), function(i) {
+    true_class <- which(classes == as.character(actual_ordered[i]))
+    obs_cdf    <- cumsum(c(rep(0, true_class - 1), 1, rep(0, k - true_class)))
+    obs_cdf    <- obs_cdf[-k]   # cumulative indicators (length k-1)
+    pred_cdf   <- cumsum(prob_matrix[i, ])[-k]
+    mean((pred_cdf - obs_cdf)^2)
+  })
+  mean(rps_vals)
+}
+
+# Results accumulator
+results_HL <- data.frame()
+results_CL <- data.frame()
+```
+
+---
+
+# Model 1 — Standards-Based Classifier (Domain Baseline)
+
+## What it is and why it matters
+
+Before training any model, it is worth asking what a domain expert would do
+without machine learning. A building energy consultant classifying buildings
+by heating load would not run a Random Forest — they would apply the thresholds
+from the energy performance standard that governs their work.
+
+The EU Energy Performance of Buildings Directive assigns residential buildings
+to energy classes based on their annual heating demand in kWh per square metre.
+The boundaries most directly relevant to our dataset's load range are:
+
+- **Class A** (efficient): below 15 kWh/m²
+- **Class B** (good): 15 – 30 kWh/m²
+- **Class C and above** (less efficient): above 30 kWh/m²
+
+We map these to our Low/Medium/High labels and apply them directly to the
+test set without any training step whatsoever. This classifier has seen
+zero training data — its rules come entirely from the regulatory standard.
+
+The gap between this classifier's accuracy and the accuracy of the learned
+models is the empirical value that machine learning adds over domain expertise
+alone. If the gap is large, the learned model is capturing something the
+standard misses. If the gap is small, the physical rules encoded in the
+standard are already nearly sufficient.
+
+## Y1 — Heating Load
+
+```{r standards-hl}
+# EU Standards-Based Classifier — Heating Load
+# The raw HeatingLoad is on the test buildings BEFORE the class labels were
+# applied. We apply the EU thresholds to the raw HeatingLoad column.
+# Note: df_test still has HeatingLoad (unscaled — scaling was only applied
+# to the feature columns, not to the target).
+
+standards_pred_HL <- case_when(
+  df_test$HeatingLoad < 15 ~ "Low",
+  df_test$HeatingLoad < 30 ~ "Medium",
+  TRUE                     ~ "High"
+) %>% factor(levels = c("Low", "Medium", "High"))
+
+cat("=== STANDARDS-BASED CLASSIFIER — Heating Load ===\n")
+cat("EU thresholds: Low < 15 kWh/m², 15 ≤ Medium < 30 kWh/m², High ≥ 30 kWh/m²\n\n")
+
+std_HL_result <- eval_clf(test_HL$HL_class, standards_pred_HL,
+                           "Standards-Based (EU)")
+cat("\nConfusion matrix:\n")
+print(std_HL_result$confusion)
+
+results_HL <- rbind(results_HL,
+  data.frame(Model    = "Standards-Based (EU)",
+             Accuracy = std_HL_result$accuracy))
+
+# Visualise where the EU thresholds agree and disagree with tertile labels
+standards_HL_df <- data.frame(
+  HeatingLoad     = df_test$HeatingLoad,
+  True_Class      = test_HL$HL_class,
+  Predicted_Class = standards_pred_HL,
+  Correct         = (test_HL$HL_class == standards_pred_HL)
+)
+
+p_std_HL <- ggplot(standards_HL_df,
+                   aes(x = HeatingLoad, y = True_Class,
+                       colour = Correct, shape = Correct)) +
+  geom_jitter(height = 0.15, alpha = 0.7, size = 2.5) +
+  geom_vline(xintercept = 15, linetype = "dashed",
+             colour = "steelblue", linewidth = 0.8) +
+  geom_vline(xintercept = 30, linetype = "dashed",
+             colour = "tomato", linewidth = 0.8) +
+  scale_colour_manual(values = c("TRUE" = "darkgreen", "FALSE" = "red"),
+                      name = "Correctly\nclassified") +
+  scale_shape_manual(values  = c("TRUE" = 16, "FALSE" = 4),
+                     name = "Correctly\nclassified") +
+  annotate("text", x = 13, y = 3.4, label = "EU A/B\n(15)", size = 3,
+           colour = "steelblue") +
+  annotate("text", x = 28, y = 3.4, label = "EU B/C\n(30)", size = 3,
+           colour = "tomato") +
+  labs(title    = "Standards-Based Classifier — Heating Load",
+       subtitle = "Dashed lines show EU energy class boundaries",
+       x = "Actual HeatingLoad (kWh/m²)",
+       y = "True Class") +
+  theme_minimal()
+
+ggsave(file.path(img_dir, "standards_hl_classification.png"),
+       plot = p_std_HL, width = 9, height = 5, dpi = 150)
+print(p_std_HL)
+```
+
+## Y2 — Cooling Load
+
+```{r standards-cl}
+# EU Standards-Based Classifier — Cooling Load 
+# EU cooling standards are less universally standardised than heating, but
+# comparable thresholds are used in Mediterranean and mixed-climate frameworks.
+# We apply the same 15/30 kWh/m² boundaries for consistency and comparability.
+
+standards_pred_CL <- case_when(
+  df_test$CoolingLoad < 15 ~ "Low",
+  df_test$CoolingLoad < 30 ~ "Medium",
+  TRUE                     ~ "High"
+) %>% factor(levels = c("Low", "Medium", "High"))
+
+cat("=== STANDARDS-BASED CLASSIFIER — Cooling Load ===\n\n")
+std_CL_result <- eval_clf(test_CL$CL_class, standards_pred_CL,
+                           "Standards-Based (EU)")
+cat("\nConfusion matrix:\n")
+print(std_CL_result$confusion)
+
+results_CL <- rbind(results_CL,
+  data.frame(Model    = "Standards-Based (EU)",
+             Accuracy = std_CL_result$accuracy))
+
+standards_CL_df <- data.frame(
+  CoolingLoad     = df_test$CoolingLoad,
+  True_Class      = test_CL$CL_class,
+  Predicted_Class = standards_pred_CL,
+  Correct         = (test_CL$CL_class == standards_pred_CL)
+)
+
+p_std_CL <- ggplot(standards_CL_df,
+                   aes(x = CoolingLoad, y = True_Class,
+                       colour = Correct, shape = Correct)) +
+  geom_jitter(height = 0.15, alpha = 0.7, size = 2.5) +
+  geom_vline(xintercept = 15, linetype = "dashed",
+             colour = "steelblue", linewidth = 0.8) +
+  geom_vline(xintercept = 30, linetype = "dashed",
+             colour = "tomato", linewidth = 0.8) +
+  scale_colour_manual(values = c("TRUE" = "darkgreen", "FALSE" = "red"),
+                      name = "Correctly\nclassified") +
+  scale_shape_manual(values  = c("TRUE" = 16, "FALSE" = 4),
+                     name = "Correctly\nclassified") +
+  labs(title    = "Standards-Based Classifier — Cooling Load",
+       subtitle = "Dashed lines show EU energy class boundaries",
+       x = "Actual CoolingLoad (kWh/m²)",
+       y = "True Class") +
+  theme_minimal()
+
+ggsave(file.path(img_dir, "standards_cl_classification.png"),
+       plot = p_std_CL, width = 9, height = 5, dpi = 150)
+print(p_std_CL)
+```
+
+---
+
+# Model 2 — Ordinal Random Forest
+
+## What ordinal classification is and why it matters here
+
+Standard classification models treat the three energy classes as three
+separate, unrelated categories. A misclassification is a misclassification,
+regardless of how far wrong the prediction was. If a building that actually
+belongs to the High class is predicted as Medium, that counts as one error.
+If the same building is predicted as Low, that also counts as one error.
+The model has no reason to prefer being slightly wrong over being very wrong.
+
+This is a problem for our task. A building engineer who acts on the model's
+predictions will make very different decisions depending on which direction
+the error goes. A Low building incorrectly flagged as High might receive
+expensive retrofitting it does not need. A High building incorrectly flagged
+as Low might receive no intervention at all when it urgently needs one.
+These are not equally bad mistakes.
+
+Ordinal Random Forest, implemented in the `ordinalForest` package, addresses
+this by training on the **Ranked Probability Score** instead of accuracy.
+The Ranked Probability Score measures the distance between the predicted
+probability distribution over classes and the true class. Predicting High
+for a true-Low building contributes a larger penalty than predicting Medium
+for a true-Low building because the cumulative probability distributions
+are further apart.
+
+The way the algorithm achieves this is through a two-stage process. In the
+first stage, it searches over a large number of candidate scoring functions
+— ways of mapping the three-class ordinal problem into a numerical score —
+and selects the one that minimises the Ranked Probability Score on the
+training data. In the second stage, it fits a standard Random Forest on
+that optimal scoring function. The result is a forest that has been tuned
+to make the smallest possible ordinal mistakes rather than the smallest
+possible number of mistakes.
+
+## Y1 — Heating Load
+
+```{r orf-hl}
+# ── Ordinal Random Forest — Heating Load (ranger direct implementation) ────────
+cat("=== ORDINAL RANDOM FOREST — Heating Load ===\n")
+cat("Training model... (this may take a few minutes)\n")
+
+library(ranger)
+
+# ranger needs the response as an unordered factor for probability forests
+train_HL_ranger <- train_HL_ord
+train_HL_ranger$HL_class_ord <- factor(
+  as.character(train_HL_ord$HL_class_ord),
+  levels = c("Low", "Medium", "High"),
+  ordered = FALSE
+)
+
+test_HL_ranger <- test_HL_ord
+test_HL_ranger$HL_class_ord <- factor(
+  as.character(test_HL_ord$HL_class_ord),
+  levels = c("Low", "Medium", "High"),
+  ordered = FALSE
+)
+
+set.seed(42)
+orf_y1 <- ranger(
+  dependent.variable.name = "HL_class_ord",
+  data                    = train_HL_ranger,
+  num.trees               = 500,
+  mtry                    = floor(sqrt(length(features))),
+  min.node.size           = 5,       # ordinalForest default for ordinal response
+  probability             = TRUE,    # returns class probabilities
+  importance              = "impurity",
+  num.threads             = parallel::detectCores() - 1
+)
+
+cat("Model training complete.\n\n")
+
+# Predict on test set — returns a probability matrix
+pred_raw <- predict(orf_y1, data = test_HL_ranger)
+pred_prob_orf_y1 <- pred_raw$predictions   # matrix: rows = obs, cols = Low/Medium/High
+
+# Ensure column order is Low, Medium, High
+pred_prob_orf_y1 <- pred_prob_orf_y1[, c("Low", "Medium", "High")]
+
+# Hard class prediction = highest probability class
+pred_class_orf_y1 <- factor(
+  colnames(pred_prob_orf_y1)[apply(pred_prob_orf_y1, 1, which.max)],
+  levels = c("Low", "Medium", "High")
+)
+
+cat("=== ORDINAL RANDOM FOREST — Heating Load — Test Set Performance ===\n")
+orf_HL_result <- eval_clf(test_HL$HL_class, pred_class_orf_y1,
+                           "Ordinal Random Forest")
+cat("\nConfusion matrix:\n")
+print(orf_HL_result$confusion)
+
+# Ranked Probability Score
+rps_orf_HL <- ranked_prob_score(
+  pred_prob_orf_y1,
+  factor(test_HL$HL_class, levels = c("Low", "Medium", "High"), ordered = TRUE)
+)
+cat(sprintf("\nRanked Probability Score: %.5f\n", rps_orf_HL))
+cat("(Lower is better; RPS = 0 means every building classified perfectly)\n")
+
+results_HL <- rbind(results_HL,
+  data.frame(Model    = "Ordinal Random Forest",
+             Accuracy = orf_HL_result$accuracy))
+
+# Variable importance
+orf_imp_y1 <- data.frame(
+  Feature    = names(orf_y1$variable.importance),
+  Importance = orf_y1$variable.importance
+) %>%
+  arrange(desc(Importance)) %>%
+  head(12)
+
+p_orf_imp_y1 <- ggplot(orf_imp_y1,
+                        aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_col(fill = "steelblue", alpha = 0.8) +
+  geom_text(aes(label = round(Importance, 1)), hjust = -0.1, size = 3) +
+  coord_flip() +
+  labs(title    = "Ordinal Random Forest — Variable Importance: Heating Load",
+       subtitle = "Mean decrease in node impurity across all 500 trees",
+       x = "Feature", y = "Importance") +
+  theme_minimal()
+
+ggsave(file.path(img_dir, "orf_hl_importance.png"),
+       plot = p_orf_imp_y1, width = 10, height = 7, dpi = 150)
+print(p_orf_imp_y1)
+
+# Confusion matrix heatmap
+orf_cm_HL <- as.data.frame(orf_HL_result$confusion) %>%
+  rename(Count = Freq)
+
+p_orf_cm_HL <- ggplot(orf_cm_HL, aes(x = Predicted, y = Actual, fill = Count)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = Count), size = 5, fontface = "bold") +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(title    = "Ordinal Random Forest — Confusion Matrix: Heating Load",
+       subtitle = "Off-diagonal cells show misclassifications",
+       x = "Predicted Class", y = "Actual Class") +
+  theme_minimal()
+
+ggsave(file.path(img_dir, "orf_hl_confusion.png"),
+       plot = p_orf_cm_HL, width = 7, height = 5, dpi = 150)
+print(p_orf_cm_HL)
+```
+
+## Y2 — Cooling Load
+
+```{r orf-cl}
+# ── Ordinal Random Forest — Cooling Load (ranger direct implementation) ────────
+cat("=== ORDINAL RANDOM FOREST — Cooling Load ===\n")
+cat("Training model...\n")
+
+# ranger needs the response as an unordered factor for probability forests
+train_CL_ranger <- train_CL_ord
+train_CL_ranger$CL_class_ord <- factor(
+  as.character(train_CL_ord$CL_class_ord),
+  levels = c("Low", "Medium", "High"),
+  ordered = FALSE
+)
+
+test_CL_ranger <- test_CL_ord
+test_CL_ranger$CL_class_ord <- factor(
+  as.character(test_CL_ord$CL_class_ord),
+  levels = c("Low", "Medium", "High"),
+  ordered = FALSE
+)
+
+set.seed(42)
+orf_y2 <- ranger(
+  dependent.variable.name = "CL_class_ord",
+  data                    = train_CL_ranger,
+  num.trees               = 500,
+  mtry                    = floor(sqrt(length(features))),
+  min.node.size           = 5,
+  probability             = TRUE,
+  importance              = "impurity",
+  num.threads             = parallel::detectCores() - 1
+)
+
+cat("Model training complete.\n\n")
+
+# Predict on test set
+pred_raw_cl       <- predict(orf_y2, data = test_CL_ranger)
+pred_prob_orf_y2  <- pred_raw_cl$predictions[, c("Low", "Medium", "High")]
+
+# Hard class prediction
+pred_class_orf_y2 <- factor(
+  colnames(pred_prob_orf_y2)[apply(pred_prob_orf_y2, 1, which.max)],
+  levels = c("Low", "Medium", "High")
+)
+
+cat("=== ORDINAL RANDOM FOREST — Cooling Load — Test Set Performance ===\n")
+orf_CL_result <- eval_clf(test_CL$CL_class, pred_class_orf_y2,
+                           "Ordinal Random Forest")
+cat("\nConfusion matrix:\n")
+print(orf_CL_result$confusion)
+
+# Ranked Probability Score
+rps_orf_CL <- ranked_prob_score(
+  pred_prob_orf_y2,
+  factor(test_CL$CL_class, levels = c("Low", "Medium", "High"), ordered = TRUE)
+)
+cat(sprintf("\nRanked Probability Score: %.5f\n", rps_orf_CL))
+cat("(Lower is better; RPS = 0 means every building classified perfectly)\n")
+
+results_CL <- rbind(results_CL,
+  data.frame(Model    = "Ordinal Random Forest",
+             Accuracy = orf_CL_result$accuracy))
+
+# Variable importance
+orf_imp_y2 <- data.frame(
+  Feature    = names(orf_y2$variable.importance),
+  Importance = orf_y2$variable.importance
+) %>%
+  arrange(desc(Importance)) %>%
+  head(12)
+
+p_orf_imp_y2 <- ggplot(orf_imp_y2,
+                        aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_col(fill = "darkorange", alpha = 0.8) +
+  geom_text(aes(label = round(Importance, 1)), hjust = -0.1, size = 3) +
+  coord_flip() +
+  labs(title    = "Ordinal Random Forest — Variable Importance: Cooling Load",
+       subtitle = "Mean decrease in node impurity across all 500 trees",
+       x = "Feature", y = "Importance") +
+  theme_minimal()
+
+ggsave(file.path(img_dir, "orf_cl_importance.png"),
+       plot = p_orf_imp_y2, width = 10, height = 7, dpi = 150)
+print(p_orf_imp_y2)
+
+# Confusion matrix heatmap
+orf_cm_CL <- as.data.frame(orf_CL_result$confusion) %>%
+  rename(Count = Freq)
+
+p_orf_cm_CL <- ggplot(orf_cm_CL, aes(x = Predicted, y = Actual, fill = Count)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = Count), size = 5, fontface = "bold") +
+  scale_fill_gradient(low = "white", high = "darkorange") +
+  labs(title    = "Ordinal Random Forest — Confusion Matrix: Cooling Load",
+       subtitle = "Off-diagonal cells show misclassifications",
+       x = "Predicted Class", y = "Actual Class") +
+  theme_minimal()
+
+ggsave(file.path(img_dir, "orf_cl_confusion.png"),
+       plot = p_orf_cm_CL, width = 7, height = 5, dpi = 150)
+print(p_orf_cm_CL)
+```
+
+---
+
+# Model 3 — Gaussian Naive Bayes with Physical Priors
+
+## What Naive Bayes does
+
+Naive Bayes is a probabilistic classifier. Rather than learning a decision
+boundary between classes, it estimates the probability that a building belongs
+to each class given its features, then assigns the building to whichever class
+it is most likely to belong to. It does this using Bayes' theorem:
+
+P(class | features) ∝ P(features | class) × P(class)
+
+The "Naive" in the name refers to the assumption that all features are
+independent of each other given the class. This is not strictly true — a
+building's WallArea and RoofArea are correlated — but the assumption
+simplifies the computation enormously and often produces surprisingly good
+predictions in practice.
+
+For Gaussian Naive Bayes specifically, the distribution of each feature
+within each class is modelled as a normal distribution. The model estimates
+a mean and a standard deviation for each feature within each energy class
+from the training data, and uses these to compute P(features | class).
+
+## What physical priors add
+
+The standard Naive Bayes approach estimates the feature distributions
+entirely from data. With 616 training rows split across three classes, that
+is approximately 200 buildings per class — enough to get reasonable estimates,
+but not so many that we should ignore what physics tells us the distributions
+should look like.
+
+We know from heat transfer principles that buildings in the Low energy class
+should tend to have high relative compactness (less envelope per unit volume),
+low glazing area (less surface for heat to escape), and smaller overall height.
+Buildings in the High class should show the opposite pattern. We can encode
+this knowledge as a **prior** — a set of initial beliefs about the feature
+distributions that the data then adjusts.
+
+In practice this means we do not estimate the class-conditional means for
+key features purely from the training data. Instead we set them to a weighted
+combination of the physically expected value and the data-estimated value.
+For features where the physical expectation is strong (compactness and glazing)
+we weight the prior more heavily; for features where we have less prior
+knowledge (the engineered interaction terms) we let the data speak.
+
+This makes the model partially data-driven and partially theory-driven. It
+is a lightweight form of the physics-informed modelling principle — not a
+full constraint satisfaction system, but a structured prior that keeps the
+model from learning physically implausible patterns when data is limited.
+
+## Y1 — Heating Load
+
+Step 1: Estimate raw class-conditional means and SDs from training data
+```{r nb-hl1}
+# Gaussian Naive Bayes with Physical Priors — Heating Load
+
+class_stats_HL <- train_HL %>%
+  group_by(HL_class) %>%
+  summarise(across(all_of(features), list(mean = mean, sd = sd)),
+            .groups = "drop")
+```
+
+Step 2: Define physically motivated prior means for key features. These are expressed in the SCALED feature space (mean=0, sd=1 from training).
+Physical reasoning:
+   Low HL  -> high compactness (negative in scaled space, compact = efficient)
+             low glazing (less heat loss), low height
+   High HL -> low compactness, high glazing, high height
+   All other features: use the data-estimated mean (prior weight = 0)
+```{r nb-hl2}
+physical_prior <- list(
+  Low = list(
+    RelCompactness  =  0.5,   # compact buildings lose less heat
+    GlazingArea     = -0.5,   # less glazing = less conductive loss
+    OverallHeight   = -0.5,   # shorter = less envelope area
+    CompactnessXHeight = 0.3, # product of above two effects
+    WallXGlazing    = -0.4    # less wall-glass interaction
+  ),
+  Medium = list(
+    RelCompactness  =  0.0,
+    GlazingArea     =  0.0,
+    OverallHeight   =  0.0,
+    CompactnessXHeight = 0.0,
+    WallXGlazing    =  0.0
+  ),
+  High = list(
+    RelCompactness  = -0.5,   # less compact = more surface loss
+    GlazingArea     =  0.5,   # more glazing = more heat loss
+    OverallHeight   =  0.5,   # taller = more envelope area
+    CompactnessXHeight = -0.3,
+    WallXGlazing    =  0.4
+  )
+)
+```
+
+Step 3: Blend data-estimated means with physical priors
+ prior_weight controls how much the physical prior pulls the estimate.
+ 0 = pure data, 1 = pure prior. We use 0.3 for physically grounded features.
+
+```{r nb-hl3}
+prior_weight <- 0.3
+
+blend_means <- function(data_mean, prior_mean, w = prior_weight) {
+  (1 - w) * data_mean + w * prior_mean
+}
+
+# Build the blended parameter list for naivebayes::gaussian_naive_bayes
+# It expects a list with one element per class, each containing means and sds
+build_nb_params <- function(class_stats, prior, feat_names) {
+  classes <- c("Low", "Medium", "High")
+  params  <- list()
+  for (cls in classes) {
+    cls_row  <- class_stats %>% filter(HL_class == cls | CL_class == cls)
+    cls_means <- sapply(feat_names, function(f) {
+      data_m <- cls_row[[paste0(f, "_mean")]]
+      if (f %in% names(prior[[cls]])) {
+        blend_means(data_m, prior[[cls]][[f]])
+      } else {
+        data_m  # no prior for this feature — use data only
+      }
+    })
+    cls_sds <- sapply(feat_names, function(f) {
+      pmax(cls_row[[paste0(f, "_sd")]], 0.01)  # floor at 0.01 to avoid zero sd
+    })
+    params[[cls]] <- list(mean = cls_means, sd = cls_sds)
+  }
+  params
+}
+```
+
+Fit Gaussian Naive Bayes using naivebayes package.
+We use the standard fit here and then demonstrate the prior blending through a manual prediction function below
+```{r nb-hl4}
+set.seed(42)
+gnb_y1 <- gaussian_naive_bayes(
+  x = as.matrix(train_HL[, features]),
+  y = train_HL$HL_class
+)
+
+# Apply physical prior blending to the estimated parameters
+# We retrieve the learned means and blend with physical priors
+gnb_means_y1 <- gnb_y1$params$mu   # classes x features
+gnb_sds_y1   <- gnb_y1$params$sd   # classes x features, already SDs
+
+# blend data-estimated means with physical priors
+prior_feats <- c("RelCompactness", "GlazingArea", "OverallHeight",
+                 "CompactnessXHeight", "WallXGlazing")
+
+for (feat in prior_feats) {
+  if (!feat %in% colnames(gnb_means_y1)) next
+  for (cls in c("Low", "Medium", "High")) {
+    prior_val <- physical_prior[[cls]][[feat]]
+    if (!is.null(prior_val)) {
+      gnb_means_y1[cls, feat] <- blend_means(
+        gnb_means_y1[cls, feat], prior_val
+      )
+    }
+  }
+}
+```
+We then generate predictions using the blended parameters, by recomputing log-likelihoods manually with the blended means
+
+```{r nb-hl5}
+cat("=== GAUSSIAN NAIVE BAYES — Heating Load (data-estimated) ===\n")
+
+predict_gnb_blended <- function(x_mat, means_mat, sds_mat, classes) {
+  log_liks <- sapply(classes, function(cls) {
+    mu  <- means_mat[cls, ]   # named vector of length n_features
+    sig <- sds_mat[cls, ]     # named vector of length n_features
+    # dnorm is vectorised over columns — compute row log-likelihoods
+    rowSums(mapply(function(x_col, m, s) dnorm(x_col, mean = m, sd = s, log = TRUE),
+                   as.data.frame(x_mat), mu, sig))
+  })
+  # log_liks is n_obs x n_classes — pick class with highest log-likelihood
+  classes[apply(log_liks, 1, which.max)]
+}
+
+# ── SD flooring — applied once, used by both standard and blended NB ──────────
+gnb_sds_y1 <- gnb_y1$params$sd
+
+for (feat in colnames(gnb_sds_y1)) {
+  overall_sd <- sd(train_HL[[feat]], na.rm = TRUE)
+  fallback   <- max(overall_sd * 0.5, 0.1)
+  for (cls in rownames(gnb_sds_y1)) {
+    val <- gnb_sds_y1[cls, feat]
+    if (is.nan(val) || is.na(val) || val < 0.1) {
+      cat(sprintf("  Flooring SD — Class: %-8s  Feature: %-20s  was: %e  now: %.4f\n",
+                  cls, feat, val, fallback))
+      gnb_sds_y1[cls, feat] <- fallback
+    }
+  }
+}
+
+cat("\nMinimum SD per class after flooring:\n")
+print(apply(gnb_sds_y1, 1, min))
+
+# ── Predictions ───────────────────────────────────────────────────────────────
+x_test_mat  <- as.matrix(test_HL[, features])
+classes_vec <- c("Low", "Medium", "High")
+
+# Standard NB: floored SDs, original data-estimated means (no prior blending)
+gnb_means_std_y1 <- gnb_y1$params$mu
+
+pred_gnb_std_y1 <- predict_gnb_blended(
+  x_test_mat, gnb_means_std_y1, gnb_sds_y1, classes_vec
+) %>% factor(levels = c("Low", "Medium", "High"))
+
+# Prior-blended NB: floored SDs, physically blended means
+pred_gnb_prior_y1 <- predict_gnb_blended(
+  x_test_mat, gnb_means_y1, gnb_sds_y1, classes_vec
+) %>% factor(levels = c("Low", "Medium", "High"))
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+cat("\n--- Standard Naive Bayes (no prior) ---\n")
+gnb_std_result <- eval_clf(test_HL$HL_class, pred_gnb_std_y1,
+                            "Naive Bayes (standard)")
+cat("Confusion matrix:\n")
+print(gnb_std_result$confusion)
+
+cat("\n--- Naive Bayes with Physical Priors ---\n")
+gnb_prior_result <- eval_clf(test_HL$HL_class, pred_gnb_prior_y1,
+                              "Naive Bayes (physical prior)")
+cat("Confusion matrix:\n")
+print(gnb_prior_result$confusion)
+
+results_HL <- rbind(results_HL,
+  data.frame(Model    = "Naive Bayes (standard)",
+             Accuracy = gnb_std_result$accuracy),
+  data.frame(Model    = "Naive Bayes (physical prior)",
+             Accuracy = gnb_prior_result$accuracy))
+```
+Plot: compare the class-conditional mean distributions for key features to show where the prior adjustment had the most effect
+Plot: compare class-conditional means before and after prior blending
+
+```{r nb-hl6}
+
+prior_effect_df <- data.frame(
+  Feature    = prior_feats,
+  Low_data   = as.numeric(gnb_y1$params$mu["Low",  prior_feats]),
+  Low_prior  = as.numeric(gnb_means_y1["Low",  prior_feats]),
+  High_data  = as.numeric(gnb_y1$params$mu["High", prior_feats]),
+  High_prior = as.numeric(gnb_means_y1["High", prior_feats])
+)
+
+prior_effect_long <- prior_effect_df %>%
+  pivot_longer(-Feature, names_to = "Type", values_to = "Mean") %>%
+  mutate(
+    Class  = ifelse(grepl("Low",  Type), "Low",       "High"),
+    Source = ifelse(grepl("data", Type), "Data only", "With physical prior")
+  )
+
+p_prior_effect <- ggplot(prior_effect_long,
+                          aes(x = Feature, y = Mean,
+                              fill = Source, alpha = Class)) +
+  geom_col(position = "dodge") +
+  scale_alpha_manual(values = c("Low" = 0.6, "High" = 1.0)) +
+  scale_fill_manual(values = c("Data only"           = "steelblue",
+                                "With physical prior" = "tomato")) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  labs(title    = "Physical Prior Effect on Class-Conditional Means — Heating Load",
+       subtitle = "Bars show data-only vs prior-blended means in the scaled feature space",
+       x = "Feature", y = "Class-conditional mean (scaled)") +
+  theme_minimal()
+
+ggsave(file.path(img_dir, "nb_prior_effect_hl.png"),
+       plot = p_prior_effect, width = 10, height = 6, dpi = 150)
+print(p_prior_effect)
+```
+
+## Y2 — Cooling Load
+
+```{r nb-cl}
+# ── Gaussian Naive Bayes with Physical Priors — Cooling Load ──────────────────
+# For cooling load the physical ordering partially reverses:
+# more glazing increases solar gain and therefore COOLING load.
+# The compactness effect remains: compact buildings have less envelope
+# and therefore lower cooling load.
+physical_prior_CL <- list(
+  Low = list(
+    RelCompactness     =  0.5,
+    GlazingArea        = -0.5,
+    OverallHeight      = -0.4,
+    CompactnessXHeight =  0.3,
+    WallXGlazing       = -0.3
+  ),
+  Medium = list(
+    RelCompactness     =  0.0,
+    GlazingArea        =  0.0,
+    OverallHeight      =  0.0,
+    CompactnessXHeight =  0.0,
+    WallXGlazing       =  0.0
+  ),
+  High = list(
+    RelCompactness     = -0.5,
+    GlazingArea        =  0.5,
+    OverallHeight      =  0.4,
+    CompactnessXHeight = -0.3,
+    WallXGlazing       =  0.3
+  )
+)
+
+# Fit standard Naive Bayes on cooling load
+set.seed(42)
+gnb_y2 <- gaussian_naive_bayes(
+  x = as.matrix(train_CL[, features]),
+  y = train_CL$CL_class
+)
+
+# Extract parameters — matrix layout is classes x features
+gnb_means_y2 <- gnb_y2$params$mu   # classes x features
+gnb_sds_y2   <- gnb_y2$params$sd   # classes x features, already SDs
+
+# SD flooring — same logic as heating load
+for (feat in colnames(gnb_sds_y2)) {
+  overall_sd <- sd(train_CL[[feat]], na.rm = TRUE)
+  fallback   <- max(overall_sd * 0.5, 0.1)
+  for (cls in rownames(gnb_sds_y2)) {
+    val <- gnb_sds_y2[cls, feat]
+    if (is.nan(val) || is.na(val) || val < 0.1) {
+      cat(sprintf("  Flooring SD — Class: %-8s  Feature: %-20s  was: %e  now: %.4f\n",
+                  cls, feat, val, fallback))
+      gnb_sds_y2[cls, feat] <- fallback
+    }
+  }
+}
+
+cat("Minimum SD per class after flooring:\n")
+print(apply(gnb_sds_y2, 1, min))
+
+# Blend data-estimated means with cooling load physical priors
+gnb_means_std_y2 <- gnb_y2$params$mu   # keep unblended copy for standard NB
+
+for (feat in prior_feats) {
+  if (!feat %in% colnames(gnb_means_y2)) next
+  for (cls in c("Low", "Medium", "High")) {
+    prior_val <- physical_prior_CL[[cls]][[feat]]
+    if (!is.null(prior_val)) {
+      gnb_means_y2[cls, feat] <- blend_means(
+        gnb_means_y2[cls, feat], prior_val
+      )
+    }
+  }
+}
+
+x_test_mat_CL <- as.matrix(test_CL[, features])
+
+# Standard NB: floored SDs, original data-estimated means
+pred_gnb_std_y2 <- predict_gnb_blended(
+  x_test_mat_CL, gnb_means_std_y2, gnb_sds_y2, classes_vec
+) %>% factor(levels = c("Low", "Medium", "High"))
+
+# Prior-blended NB: floored SDs, physically blended means
+pred_gnb_prior_y2 <- predict_gnb_blended(
+  x_test_mat_CL, gnb_means_y2, gnb_sds_y2, classes_vec
+) %>% factor(levels = c("Low", "Medium", "High"))
+
+cat("=== GAUSSIAN NAIVE BAYES — Cooling Load ===\n")
+
+cat("\n--- Standard Naive Bayes (no prior) ---\n")
+gnb_std_CL_result <- eval_clf(test_CL$CL_class, pred_gnb_std_y2,
+                               "Naive Bayes (standard)")
+cat("Confusion matrix:\n")
+print(gnb_std_CL_result$confusion)
+
+cat("\n--- Naive Bayes with Physical Priors ---\n")
+gnb_prior_CL_result <- eval_clf(test_CL$CL_class, pred_gnb_prior_y2,
+                                 "Naive Bayes (physical prior)")
+cat("Confusion matrix:\n")
+print(gnb_prior_CL_result$confusion)
+
+results_CL <- rbind(results_CL,
+  data.frame(Model    = "Naive Bayes (standard)",
+             Accuracy = gnb_std_CL_result$accuracy),
+  data.frame(Model    = "Naive Bayes (physical prior)",
+             Accuracy = gnb_prior_CL_result$accuracy))
+
+# Plot: prior effect on class-conditional means — Cooling Load
+prior_effect_CL_df <- data.frame(
+  Feature    = prior_feats,
+  Low_data   = as.numeric(gnb_y2$params$mu["Low",  prior_feats]),
+  Low_prior  = as.numeric(gnb_means_y2["Low",  prior_feats]),
+  High_data  = as.numeric(gnb_y2$params$mu["High", prior_feats]),
+  High_prior = as.numeric(gnb_means_y2["High", prior_feats])
+)
+
+prior_effect_CL_long <- prior_effect_CL_df %>%
+  pivot_longer(-Feature, names_to = "Type", values_to = "Mean") %>%
+  mutate(
+    Class  = ifelse(grepl("Low",  Type), "Low",       "High"),
+    Source = ifelse(grepl("data", Type), "Data only", "With physical prior")
+  )
+
+p_prior_effect_CL <- ggplot(prior_effect_CL_long,
+                              aes(x = Feature, y = Mean,
+                                  fill = Source, alpha = Class)) +
+  geom_col(position = "dodge") +
+  scale_alpha_manual(values = c("Low" = 0.6, "High" = 1.0)) +
+  scale_fill_manual(values = c("Data only"           = "steelblue",
+                                "With physical prior" = "tomato")) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  labs(title    = "Physical Prior Effect on Class-Conditional Means — Cooling Load",
+       subtitle = "Bars show data-only vs prior-blended means in the scaled feature space",
+       x = "Feature", y = "Class-conditional mean (scaled)") +
+  theme_minimal()
+
+ggsave(file.path(img_dir, "nb_prior_effect_cl.png"),
+       plot = p_prior_effect_CL, width = 10, height = 6, dpi = 150)
+print(p_prior_effect_CL)
+```
+
+---
+
+# Ordinal Error Analysis
+
+One of the advantages of ordinal classification is that we can break down
+errors by severity — not just whether a building was misclassified, but how
+far wrong the prediction was. A one-step error (Low predicted as Medium) is
+qualitatively different from a two-step error (Low predicted as High).
+
+This section computes the error distance distribution for each model and
+target, showing how many of each model's mistakes were small (one class off)
+versus large (two classes off).
+
+```{r ordinal-error-analysis}
+# Ordinal distance function: 0 = correct, 1 = one step, 2 = two steps
+ordinal_distance <- function(actual, predicted) {
+  class_order <- c("Low" = 1, "Medium" = 2, "High" = 3)
+  abs(class_order[as.character(actual)] - class_order[as.character(predicted)])
+}
+
+# Compute error distances for each model on Heating Load
+error_dist_HL <- data.frame(
+  Model = c(
+    rep("Standards-Based (EU)",      length(test_HL$HL_class)),
+    rep("Ordinal Random Forest",     length(test_HL$HL_class)),
+    rep("NB (standard)",             length(test_HL$HL_class)),
+    rep("NB (physical prior)",       length(test_HL$HL_class))
+  ),
+  Distance = c(
+    ordinal_distance(test_HL$HL_class, standards_pred_HL),
+    ordinal_distance(test_HL$HL_class, pred_class_orf_y1),
+    ordinal_distance(test_HL$HL_class, pred_gnb_std_y1),
+    ordinal_distance(test_HL$HL_class, pred_gnb_prior_y1)
+  )
+)
+
+error_summary_HL <- error_dist_HL %>%
+  group_by(Model, Distance) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  group_by(Model) %>%
+  mutate(Proportion = Count / sum(Count))
+
+p_error_HL <- ggplot(error_summary_HL,
+                      aes(x = factor(Distance), y = Proportion,
+                          fill = factor(Distance))) +
+  geom_col() +
+  facet_wrap(~Model, ncol = 2) +
+  scale_fill_manual(
+    values = c("0" = "darkgreen", "1" = "goldenrod", "2" = "tomato"),
+    labels = c("0" = "Correct", "1" = "1 class off", "2" = "2 classes off"),
+    name   = "Error severity"
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title    = "Ordinal Error Distribution — Heating Load",
+       subtitle = "How severe are each model's mistakes? Green = correct, red = worst errors",
+       x = "Error distance (classes)", y = "Proportion of test buildings") +
+  theme_minimal()
+
+ggsave(file.path(img_dir, "ordinal_error_hl.png"),
+       plot = p_error_HL, width = 11, height = 7, dpi = 150)
+print(p_error_HL)
+
+# Same for Cooling Load
+error_dist_CL <- data.frame(
+  Model = c(
+    rep("Standards-Based (EU)",      length(test_CL$CL_class)),
+    rep("Ordinal Random Forest",     length(test_CL$CL_class)),
+    rep("NB (standard)",             length(test_CL$CL_class)),
+    rep("NB (physical prior)",       length(test_CL$CL_class))
+  ),
+  Distance = c(
+    ordinal_distance(test_CL$CL_class, standards_pred_CL),
+    ordinal_distance(test_CL$CL_class, pred_class_orf_y2),
+    ordinal_distance(test_CL$CL_class, pred_gnb_std_y2),
+    ordinal_distance(test_CL$CL_class, pred_gnb_prior_y2)
+  )
+)
+
+error_summary_CL <- error_dist_CL %>%
+  group_by(Model, Distance) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  group_by(Model) %>%
+  mutate(Proportion = Count / sum(Count))
+
+p_error_CL <- ggplot(error_summary_CL,
+                      aes(x = factor(Distance), y = Proportion,
+                          fill = factor(Distance))) +
+  geom_col() +
+  facet_wrap(~Model, ncol = 2) +
+  scale_fill_manual(
+    values = c("0" = "darkgreen", "1" = "goldenrod", "2" = "tomato"),
+    labels = c("0" = "Correct", "1" = "1 class off", "2" = "2 classes off"),
+    name   = "Error severity"
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title    = "Ordinal Error Distribution — Cooling Load",
+       subtitle = "How severe are each model's mistakes?",
+       x = "Error distance (classes)", y = "Proportion of test buildings") +
+  theme_minimal()
+
+ggsave(file.path(img_dir, "ordinal_error_cl.png"),
+       plot = p_error_CL, width = 11, height = 7, dpi = 150)
+print(p_error_CL)
+```
+
+---
+
+# Model Comparison
+
+## Heating Load (Y1)
+
+```{r comparison-hl}
+results_HL <- results_HL %>% arrange(desc(Accuracy))
+
+cat("\n=== HEATING LOAD — MODEL COMPARISON ===\n")
+print(results_HL, row.names = FALSE)
+
+p_acc_HL <- ggplot(results_HL,
+                    aes(x = reorder(Model, Accuracy), y = Accuracy)) +
+  geom_col(fill = "steelblue", alpha = 0.85) +
+  geom_text(aes(label = paste0(round(Accuracy * 100, 1), "%")),
+            hjust = -0.1, size = 3.5) +
+  coord_flip() +
+  scale_y_continuous(limits = c(0, 1.1), labels = scales::percent) +
+  labs(title    = "Domain-Appropriate Model Comparison — Heating Load (Y1)",
+       subtitle = "Test set accuracy; Standards-Based is the no-training domain baseline",
+       x = "Model", y = "Accuracy") +
+  theme_minimal()
+
+ggsave(file.path(img_dir, "domain_clf_comparison_hl.png"),
+       plot = p_acc_HL, width = 10, height = 5, dpi = 150)
+print(p_acc_HL)
+```
+
+## Cooling Load (Y2)
+
+```{r comparison-cl}
+results_CL <- results_CL %>% arrange(desc(Accuracy))
+
+cat("\n=== COOLING LOAD — MODEL COMPARISON ===\n")
+print(results_CL, row.names = FALSE)
+
+p_acc_CL <- ggplot(results_CL,
+                    aes(x = reorder(Model, Accuracy), y = Accuracy)) +
+  geom_col(fill = "darkorange", alpha = 0.85) +
+  geom_text(aes(label = paste0(round(Accuracy * 100, 1), "%")),
+            hjust = -0.1, size = 3.5) +
+  coord_flip() +
+  scale_y_continuous(limits = c(0, 1.1), labels = scales::percent) +
+  labs(title    = "Domain-Appropriate Model Comparison — Cooling Load (Y2)",
+       subtitle = "Test set accuracy; Standards-Based is the no-training domain baseline",
+       x = "Model", y = "Accuracy") +
+  theme_minimal()
+
+ggsave(file.path(img_dir, "domain_clf_comparison_cl.png"),
+       plot = p_acc_CL, width = 10, height = 5, dpi = 150)
+print(p_acc_CL)
+```
+
+---
+
+# Session Information
+
+```{r session-info}
+sessionInfo()
+```

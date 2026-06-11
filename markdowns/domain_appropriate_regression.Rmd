@@ -1,0 +1,455 @@
+---
+title: "Final Project — Linear Regression Models"
+author: "Group 5"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 11, fig.height = 7)
+```
+
+```{r packages}
+pkgs <- c("tidyverse", "readxl", "caret", "car", "glmnet",
+          "ggplot2", "gridExtra", "broom", "lmtest", "nortest")
+lapply(pkgs, library, character.only = TRUE)
+```
+---
+
+## 1. Data Loading and Split
+
+```{r load-data}
+df <- read_excel("~/Documents/strathmore/Modules/Module 3/linear_models/classwork/final_project/markdowns/new_data/ENB2012_post_EDA.xlsx")
+
+# Restore factors
+df$Orientation_f     <- factor(df$Orientation, levels = 2:5,
+                                labels = c("N", "E", "S", "W"))
+df$OverallHeight_f   <- factor(df$OverallHeight, levels = c(3.5, 7.0),
+                                labels = c("Low_3.5m", "High_7m"))
+df$GlazingArea_f     <- factor(df$GlazingArea,
+                                levels = c(0, 0.1, 0.25, 0.4),
+                                labels = c("None","Low_10pct",
+                                           "Med_25pct","High_40pct"))
+df$GlazingAreaDist_f <- factor(df$GlazingAreaDist, levels = 0:5,
+                                labels = c("None","Uniform","N_heavy",
+                                           "E_heavy","S_heavy","W_heavy"))
+
+cat("Rows:", nrow(df), "\n")
+cat("Columns:", ncol(df), "\n")
+```
+
+The EDA established that ENB2012 has a combinatorial grid structure where each building configuration appears four times, once per orientation. A naive random split would leak building shapes between training and test sets, inflating apparent model performance. All splits here use a group-aware strategy that keeps all four orientation variants of each configuration on the same side of the split.
+
+```{r split}
+df <- df %>%
+  mutate(group_key = paste(RelCompactness, WallArea, RoofArea,
+                           OverallHeight, GlazingArea, GlazingAreaDist,
+                           sep = "_"))
+
+set.seed(42)
+unique_groups  <- unique(df$group_key)
+n_train_groups <- round(0.80 * length(unique_groups))
+train_groups   <- sample(unique_groups, n_train_groups)
+
+df_train <- df %>% filter( group_key %in% train_groups)
+df_test  <- df %>% filter(!group_key %in% train_groups)
+
+cat("Training rows:", nrow(df_train), "\n")
+cat("Test rows    :", nrow(df_test),  "\n")
+cat("Group overlap:", length(intersect(df_train$group_key,
+                                       df_test$group_key)),
+    "<- zero confirms no leakage\n")
+```
+
+---
+
+## 2. Feature Engineering
+
+The EDA interaction plot showed that the effect of glazing area on heating load is steeper for tall buildings, confirming a genuine `OverallHeight × GlazingArea` interaction. The VIF analysis showed severe collinearity among the geometric variables, which motivated constructing physically interpretable composite features that capture cross-variable relationships while reducing redundancy.
+
+```{r features}
+engineer <- function(d) {
+  d %>% mutate(
+    CompactnessXHeight  = RelCompactness * OverallHeight,
+    WallToRoofRatio     = WallArea / RoofArea,
+    GlazingXCompactness = GlazingArea * RelCompactness,
+    SurfToVol           = SurfaceArea / (WallArea + RoofArea),
+    GlazingXHeight      = GlazingArea * OverallHeight,
+    WallXGlazing        = WallArea * GlazingArea,
+    CompactnessSquared  = RelCompactness^2,
+    HeightSquared       = OverallHeight^2,
+    GlazingToWall       = GlazingArea / (WallArea + 1),
+    EnvelopeArea        = WallArea + RoofArea,
+    WallPerHeight       = WallArea / (OverallHeight + 1)
+  )
+}
+
+df_train <- engineer(df_train)
+df_test  <- engineer(df_test)
+
+cat("Engineered feature count:", ncol(df_train), "\n")
+```
+
+`SurfaceArea` is excluded from all models. The EDA confirmed it is a near-perfect linear combination of `WallArea` and `RoofArea` (r ≈ −0.99 with `RelCompactness`), and including it causes rank deficiency in the model matrix.
+
+---
+
+## 3. Scaling
+
+Scaling is fitted on training data only and then applied to the test set using the same parameters. Fitting the scaler on the full dataset before splitting would constitute data leakage.
+
+```{r scaling}
+base_features <- c(
+  "RelCompactness", "WallArea", "RoofArea", "OverallHeight",
+  "GlazingArea", "GlazingAreaDist",
+  "CompactnessXHeight", "WallToRoofRatio", "GlazingXCompactness",
+  "SurfToVol", "GlazingXHeight", "WallXGlazing",
+  "CompactnessSquared", "GlazingToWall", "EnvelopeArea", "WallPerHeight"
+)
+
+preproc <- caret::preProcess(df_train[, base_features],
+                              method = c("center", "scale"))
+df_train[, base_features] <- predict(preproc, df_train[, base_features])
+df_test[, base_features]  <- predict(preproc, df_test[, base_features])
+
+cat("Scaling complete. All features centred and scaled to unit variance.\n")
+```
+
+---
+
+## 4. Evaluation Helper
+
+```{r eval-helper}
+eval_reg <- function(actual, predicted, model_name) {
+  residuals <- actual - predicted
+  rmse <- sqrt(mean(residuals^2))
+  mae  <- mean(abs(residuals))
+  ss_res <- sum(residuals^2)
+  ss_tot <- sum((actual - mean(actual))^2)
+  r2   <- 1 - ss_res / ss_tot
+  cat(sprintf("%-40s  RMSE = %6.3f  MAE = %6.3f  R² = %.4f\n",
+              model_name, rmse, mae, r2))
+  list(model_name = model_name, rmse = rmse, mae = mae, r2 = r2)
+}
+
+results_HL <- data.frame()
+results_CL <- data.frame()
+```
+
+---
+
+## 5. Model 1 — Baseline OLS (No Interaction Terms)
+
+The first model uses only the original eight features (minus `SurfaceArea`) with no engineering. This establishes a performance floor against which all subsequent models are compared.
+
+```{r ols-base}
+formula_base <- HeatingLoad ~ RelCompactness + WallArea + RoofArea +
+                              OverallHeight + GlazingArea + GlazingAreaDist +
+                              Orientation
+
+lm_base_HL <- lm(formula_base, data = df_train)
+cat("=== BASELINE OLS — Heating Load ===\n")
+print(summary(lm_base_HL))
+
+pred_base_HL <- predict(lm_base_HL, newdata = df_test)
+res_base_HL  <- eval_reg(df_test$HeatingLoad, pred_base_HL,
+                          "Baseline OLS")
+
+results_HL <- rbind(results_HL,
+  data.frame(Model = "Baseline OLS",
+             RMSE  = res_base_HL$rmse,
+             MAE   = res_base_HL$mae,
+             R2    = res_base_HL$r2))
+```
+
+The baseline achieves R²=0.919 and RMSE=2.840 kWh/m². Despite the severe VIFs documented in the EDA, the model's overall fit is reasonable because R² aggregates all predictors — the collinearity inflates individual standard errors but doesn't prevent the model from fitting the combined signal. Orientation (p=0.833) and GlazingAreaDist (p=0.347 in the CL version) are already near-zero, consistent with their flat LOESS curves in the EDA. This RMSE of 2.840 is the performance floor all subsequent models are measured against.
+
+---
+
+## 6. Model 2 — OLS with Interaction Terms
+
+The EDA interaction plot showed a crossing pattern between `OverallHeight` and `GlazingArea`. Adding this interaction, plus the physically motivated cross terms from feature engineering, tests whether the model can capture the nonlinear surface that the scatter plots suggested.
+
+```{r ols-interact}
+formula_interact <- HeatingLoad ~ RelCompactness + WallArea + RoofArea +
+                                  OverallHeight + GlazingArea + GlazingAreaDist +
+                                  Orientation +
+                                  CompactnessXHeight + GlazingXHeight +
+                                  WallXGlazing + GlazingXCompactness
+
+lm_interact_HL <- lm(formula_interact, data = df_train)
+cat("=== OLS WITH INTERACTIONS — Heating Load ===\n")
+print(summary(lm_interact_HL))
+
+pred_interact_HL <- predict(lm_interact_HL, newdata = df_test)
+res_interact_HL  <- eval_reg(df_test$HeatingLoad, pred_interact_HL,
+                              "OLS with Interactions")
+
+results_HL <- rbind(results_HL,
+  data.frame(Model = "OLS with Interactions",
+             RMSE  = res_interact_HL$rmse,
+             MAE   = res_interact_HL$mae,
+             R2    = res_interact_HL$r2))
+```
+
+The interaction model reduces RMSE from 2.840 to 2.470 (−13%) and improves R² from 0.919 to 0.939, confirming that the crossing pattern in the EDA interaction plot reflects real structure. However, the GlazingXHeight coefficient is −1.20 (p=0.326, not significant), which runs counter to the physical expectation. The reason is that GlazingXHeight's signal is being absorbed by CompactnessXHeight (coefficient −60.5, p<0.001) and GlazingXCompactness (coefficient +8.3, p<0.001), which together capture the height-dependent glazing effect more efficiently. In the cooling load version, GlazingXHeight is also non-significant (p=0.096), pointing to the same collinear absorption.
+
+---
+
+## 7. Model 3 — Ridge Regression
+
+The severe VIFs (up to 212 for `RoofArea`) established in the EDA make Ridge regression a natural choice. Ridge does not zero out any predictor but shrinks all coefficients toward zero in proportion to their collinearity, producing stable estimates where OLS cannot.
+
+```{r ridge}
+library(glmnet)
+X_train <- as.matrix(df_train[, base_features])
+X_test  <- as.matrix(df_test[,  base_features])
+y_train_HL <- df_train$HeatingLoad
+y_test_HL  <- df_test$HeatingLoad
+
+set.seed(42)
+ridge_cv_HL <- cv.glmnet(X_train, y_train_HL,
+                          alpha  = 0,
+                          nfolds = 10)
+
+cat("=== RIDGE REGRESSION — Heating Load ===\n")
+cat(sprintf("Optimal lambda (1se): %.4f\n", ridge_cv_HL$lambda.1se))
+cat(sprintf("Optimal lambda (min): %.4f\n", ridge_cv_HL$lambda.min))
+
+# Plot cross-validation curve
+plot(ridge_cv_HL, main = "Ridge CV — Heating Load")
+
+pred_ridge_HL <- predict(ridge_cv_HL, newx = X_test,
+                          s = "lambda.1se")
+res_ridge_HL  <- eval_reg(y_test_HL, pred_ridge_HL,
+                           "Ridge Regression")
+
+# Coefficient path
+ridge_full_HL <- glmnet(X_train, y_train_HL, alpha = 0)
+plot(ridge_full_HL, xvar = "lambda",
+     main = "Ridge Coefficient Path — Heating Load",
+     label = TRUE)
+
+results_HL <- rbind(results_HL,
+  data.frame(Model = "Ridge Regression",
+             RMSE  = res_ridge_HL$rmse,
+             MAE   = res_ridge_HL$mae,
+             R2    = res_ridge_HL$r2))
+```
+
+The coefficient path plot (reproduced above) shows that features 4 (OverallHeight), 11 (GlazingXHeight), and 16 (the dominant negative-coefficient feature visible at the bottom) shrink last, confirming their genuine predictive signal. The cluster of paths converging near zero at low −log(λ) values corresponds to the highly collinear geometric features (RelCompactness, RoofArea, SurfToVol) whose apparent OLS coefficients were artefacts of multicollinearity. Ridge RMSE is 2.546 for HL and 2.888 for CL. For cooling load, Ridge is the best-performing model overall (RMSE=2.888), suggesting that for CL the dominant source of error is collinearity rather than unmodelled nonlinearity — shrinking coefficients without zeroing any is more effective than selection.
+
+---
+
+## 8. Model 4 — Lasso Regression
+
+Where Ridge shrinks all coefficients without zeroing any, Lasso performs implicit variable selection by driving some coefficients exactly to zero. Given the redundancy among the geometric features, Lasso may identify a sparse subset sufficient for accurate prediction.
+
+```{r lasso}
+set.seed(42)
+lasso_cv_HL <- cv.glmnet(X_train, y_train_HL,
+                          alpha  = 1,
+                          nfolds = 10)
+
+cat("=== LASSO REGRESSION — Heating Load ===\n")
+cat(sprintf("Optimal lambda (1se): %.4f\n", lasso_cv_HL$lambda.1se))
+
+plot(lasso_cv_HL, main = "Lasso CV — Heating Load")
+
+pred_lasso_HL <- predict(lasso_cv_HL, newx = X_test,
+                          s = "lambda.1se")
+res_lasso_HL  <- eval_reg(y_test_HL, pred_lasso_HL,
+                           "Lasso Regression")
+
+# Which features survived selection?
+lasso_coefs_HL <- coef(lasso_cv_HL, s = "lambda.1se")
+selected_HL    <- rownames(lasso_coefs_HL)[lasso_coefs_HL[, 1] != 0]
+cat("\nFeatures retained by Lasso:\n")
+print(selected_HL)
+cat("Features zeroed out:", length(base_features) + 1 - length(selected_HL), "\n")
+
+results_HL <- rbind(results_HL,
+  data.frame(Model = "Lasso Regression",
+             RMSE  = res_lasso_HL$rmse,
+             MAE   = res_lasso_HL$mae,
+             R2    = res_lasso_HL$r2))
+```
+
+Lasso zeroed 7 of 16 features for heating load and 6 of 16 for cooling load. The zeroed features for HL include RelCompactness and GlazingArea — two of the strongest physical predictors in the baseline OLS. This is not evidence that those variables are unimportant; it is evidence that their signal is fully captured by the interaction and ratio terms that Lasso chose to retain instead (WallToRoofRatio, SurfToVol, GlazingXHeight). Orientation is correctly zeroed in both models, matching the EDA finding. The divergence between HL and CL retained sets is informative: cooling load Lasso drops WallXGlazing and EnvelopeArea but keeps GlazingXCompactness and CompactnessSquared, pointing to a stronger quadratic compactness effect in the cooling response.
+
+---
+
+## 9. Model 5 — Elastic Net
+
+Elastic Net combines the Ridge penalty (which handles correlated feature groups) with the Lasso penalty (which performs selection). When predictors are correlated, Lasso tends to pick one arbitrarily from a correlated group; Elastic Net tends to include or exclude the group together, which is more physically interpretable here.
+
+```{r elastic-net}
+set.seed(42)
+enet_cv_HL <- cv.glmnet(X_train, y_train_HL,
+                         alpha  = 0.5,
+                         nfolds = 10)
+
+cat("=== ELASTIC NET — Heating Load ===\n")
+cat(sprintf("Optimal lambda (1se): %.4f\n", enet_cv_HL$lambda.1se))
+
+pred_enet_HL <- predict(enet_cv_HL, newx = X_test,
+                         s = "lambda.1se")
+res_enet_HL  <- eval_reg(y_test_HL, pred_enet_HL,
+                          "Elastic Net (alpha=0.5)")
+
+enet_coefs_HL <- coef(enet_cv_HL, s = "lambda.1se")
+selected_enet_HL <- rownames(enet_coefs_HL)[enet_coefs_HL[, 1] != 0]
+cat("\nFeatures retained by Elastic Net:\n")
+print(selected_enet_HL)
+
+results_HL <- rbind(results_HL,
+  data.frame(Model = "Elastic Net",
+             RMSE  = res_enet_HL$rmse,
+             MAE   = res_enet_HL$mae,
+             R2    = res_enet_HL$r2))
+```
+For heating load, Elastic Net (RMSE=2.428) marginally outperforms OLS with interactions (RMSE=2.470) despite retaining 16 of 16 features — the L1 penalty is small enough (λ=0.0034) that almost no zeroing occurs, and the benefit comes almost entirely from the L2 shrinkage of the collinear geometric terms. For cooling load, Ridge wins (RMSE=2.888) and Elastic Net is second (RMSE=2.932), suggesting the cooling load benefits more from uniform shrinkage than from sparsity.
+---
+
+## 10. Residual Diagnostics — Best Linear Model
+
+Good practice is to run full residual diagnostics on the best-performing linear model before drawing conclusions. The four standard plots test the OLS assumptions of linearity, homoscedasticity, normality of residuals, and absence of highly influential observations.
+
+```{r residuals}
+# Run on the interaction model — adjust if Ridge/Lasso outperform it
+cat("=== RESIDUAL DIAGNOSTICS — OLS with Interactions ===\n")
+
+par(mfrow = c(2, 2))
+plot(lm_interact_HL, which = 1:4)
+par(mfrow = c(1, 1))
+
+# Formal tests
+cat("\nBreusch-Pagan test for heteroscedasticity:\n")
+print(lmtest::bptest(lm_interact_HL))
+
+cat("\nAnderson-Darling test on residuals:\n")
+print(nortest::ad.test(residuals(lm_interact_HL)))
+```
+
+The Breusch-Pagan statistic (BP=268.9, df=11, p<2.2e-16) and Anderson-Darling statistic (A=8.12, p<2.2e-16) both reject their null hypotheses decisively. This means the interaction OLS model has severe heteroscedasticity and non-normal residuals — neither is surprising given the bimodal response distribution driven by OverallHeight. The residuals are not randomly distributed around zero; they fan out differently for low-height and high-height buildings. This is not a modelling failure, it is a structural consequence of the two-cluster data-generating process that linear models cannot fully resolve. It directly motivates the GAM, MARS, and tree-based models, which can partition the feature space rather than imposing a global linear relationship.
+
+---
+
+## 11. Repeat All Models for Cooling Load
+
+```{r cooling-load-models}
+y_train_CL <- df_train$CoolingLoad
+y_test_CL  <- df_test$CoolingLoad
+
+# Baseline OLS
+formula_base_CL <- CoolingLoad ~ RelCompactness + WallArea + RoofArea +
+                                  OverallHeight + GlazingArea +
+                                  GlazingAreaDist + Orientation
+
+lm_base_CL <- lm(formula_base_CL, data = df_train)
+cat("=== BASELINE OLS — Cooling Load ===\n")
+print(summary(lm_base_CL))
+pred_base_CL <- predict(lm_base_CL, newdata = df_test)
+res_base_CL  <- eval_reg(y_test_CL, pred_base_CL, "Baseline OLS")
+results_CL   <- rbind(results_CL,
+  data.frame(Model = "Baseline OLS",
+             RMSE  = res_base_CL$rmse,
+             MAE   = res_base_CL$mae,
+             R2    = res_base_CL$r2))
+
+# OLS with interactions
+formula_interact_CL <- CoolingLoad ~ RelCompactness + WallArea + RoofArea +
+                                      OverallHeight + GlazingArea +
+                                      GlazingAreaDist + Orientation +
+                                      CompactnessXHeight + GlazingXHeight +
+                                      WallXGlazing + GlazingXCompactness
+
+lm_interact_CL <- lm(formula_interact_CL, data = df_train)
+cat("\n=== OLS WITH INTERACTIONS — Cooling Load ===\n")
+print(summary(lm_interact_CL))
+pred_interact_CL <- predict(lm_interact_CL, newdata = df_test)
+res_interact_CL  <- eval_reg(y_test_CL, pred_interact_CL,
+                              "OLS with Interactions")
+results_CL <- rbind(results_CL,
+  data.frame(Model = "OLS with Interactions",
+             RMSE  = res_interact_CL$rmse,
+             MAE   = res_interact_CL$mae,
+             R2    = res_interact_CL$r2))
+
+# Ridge
+set.seed(42)
+ridge_cv_CL   <- cv.glmnet(X_train, y_train_CL, alpha = 0, nfolds = 10)
+pred_ridge_CL <- predict(ridge_cv_CL, newx = X_test, s = "lambda.1se")
+res_ridge_CL  <- eval_reg(y_test_CL, pred_ridge_CL, "Ridge Regression")
+cat(sprintf("\nRidge optimal lambda (1se): %.4f\n", ridge_cv_CL$lambda.1se))
+results_CL <- rbind(results_CL,
+  data.frame(Model = "Ridge Regression",
+             RMSE  = res_ridge_CL$rmse,
+             MAE   = res_ridge_CL$mae,
+             R2    = res_ridge_CL$r2))
+
+# Lasso
+set.seed(42)
+lasso_cv_CL   <- cv.glmnet(X_train, y_train_CL, alpha = 1, nfolds = 10)
+pred_lasso_CL <- predict(lasso_cv_CL, newx = X_test, s = "lambda.1se")
+res_lasso_CL  <- eval_reg(y_test_CL, pred_lasso_CL, "Lasso Regression")
+lasso_coefs_CL   <- coef(lasso_cv_CL, s = "lambda.1se")
+selected_CL      <- rownames(lasso_coefs_CL)[lasso_coefs_CL[, 1] != 0]
+cat("\nLasso features retained (Cooling Load):\n")
+print(selected_CL)
+results_CL <- rbind(results_CL,
+  data.frame(Model = "Lasso Regression",
+             RMSE  = res_lasso_CL$rmse,
+             MAE   = res_lasso_CL$mae,
+             R2    = res_lasso_CL$r2))
+
+# Elastic Net
+set.seed(42)
+enet_cv_CL   <- cv.glmnet(X_train, y_train_CL, alpha = 0.5, nfolds = 10)
+pred_enet_CL <- predict(enet_cv_CL, newx = X_test, s = "lambda.1se")
+res_enet_CL  <- eval_reg(y_test_CL, pred_enet_CL, "Elastic Net (alpha=0.5)")
+results_CL   <- rbind(results_CL,
+  data.frame(Model = "Elastic Net",
+             RMSE  = res_enet_CL$rmse,
+             MAE   = res_enet_CL$mae,
+             R2    = res_enet_CL$r2))
+```
+
+---
+
+## 12. Model Comparison
+
+```{r comparison}
+cat("=== HEATING LOAD — Model Comparison ===\n")
+print(results_HL %>% arrange(RMSE))
+
+cat("\n=== COOLING LOAD — Model Comparison ===\n")
+print(results_CL %>% arrange(RMSE))
+
+# Visualise
+p_HL <- ggplot(results_HL, aes(x = reorder(Model, RMSE), y = RMSE)) +
+  geom_col(fill = "steelblue", alpha = 0.8) +
+  geom_text(aes(label = round(RMSE, 3)), hjust = -0.1, size = 3) +
+  coord_flip() +
+  labs(title = "Linear Models — RMSE Comparison: Heating Load",
+       x = NULL, y = "RMSE (kWh/m²)") +
+  theme_minimal()
+
+p_CL <- ggplot(results_CL, aes(x = reorder(Model, RMSE), y = RMSE)) +
+  geom_col(fill = "darkorange", alpha = 0.8) +
+  geom_text(aes(label = round(RMSE, 3)), hjust = -0.1, size = 3) +
+  coord_flip() +
+  labs(title = "Linear Models — RMSE Comparison: Cooling Load",
+       x = NULL, y = "RMSE (kWh/m²)") +
+  theme_minimal()
+
+grid.arrange(p_HL, p_CL, ncol = 2)
+```
+
+The comparison serves two purposes. First, it identifies the best linear model to carry forward as the linear baseline in the final cross-model comparison. Second, the gap between the baseline OLS and the regularised models quantifies how much the collinearity identified in the EDA was hurting raw OLS performance. The RMSE reduction from Baseline OLS to the best model is 0.412 kWh/m² for heating load (14.5% improvement) and 0.273 kWh/m² for cooling load (8.6% improvement). The smaller gain for cooling load reflects that its response surface is flatter and less interaction-driven than heating load, leaving less room for feature engineering to help. The best linear models to carry forward as baselines in the cross-model comparison are Elastic Net for heating load (RMSE=2.428) and Ridge for cooling load (RMSE=2.888).
