@@ -70,13 +70,17 @@ pkgs <- c(
   "ranger",       # probability forest (used in place of ordinalForest)
   "naivebayes",   # Gaussian Naive Bayes
   "pROC",         # Multiclass AUC
-  "knitr"
+  "knitr",
+  # Nonlinear
+   "earth",  # MARS
+   "e1071",  # SVR
+   "grf"
 )
 lapply(pkgs, library, character.only = TRUE)
 ```
 
 ```{r img-dir}
-img_dir <- "images"
+img_dir <- "~/Documents/strathmore/Modules/Module 3/linear_models/classwork/final_project/markdowns/integrated_analysis_files/images"
 dir.create(img_dir, showWarnings = FALSE, recursive = TRUE)
 ```
 
@@ -137,7 +141,7 @@ cat("\nDuplicated rows:", sum(duplicated(df)), "\n")
 ```
 
 ENB2012 has no missing values by construction. Any duplicated rows would
-indicate a simulation export error; none are present.
+indicate a simulation export error. No duplicates are present.
 
 ## Univariate Distributions
 
@@ -384,27 +388,7 @@ cat("Dimensions:", nrow(df), "rows x", ncol(df), "columns\n")
 
 # Part 2 — Linear Regression Models
 
-## Data Loading and Group-Aware Split
-
-The EDA established that ENB2012 has a combinatorial grid structure where each
-building configuration appears four times, once per orientation. A naive random
-split would leak building shapes between training and test sets, inflating
-apparent performance. All splits here keep all four orientation variants of
-each configuration on the same side.
-
 ```{r reg-split}
-df <- read_excel("ENB2012_post_EDA.xlsx")
-
-df$Orientation_f     <- factor(df$Orientation, levels = 2:5,
-                                labels = c("N", "E", "S", "W"))
-df$OverallHeight_f   <- factor(df$OverallHeight, levels = c(3.5, 7.0),
-                                labels = c("Low_3.5m", "High_7m"))
-df$GlazingArea_f     <- factor(df$GlazingArea, levels = c(0, 0.1, 0.25, 0.4),
-                                labels = c("None","Low_10pct","Med_25pct","High_40pct"))
-df$GlazingAreaDist_f <- factor(df$GlazingAreaDist, levels = 0:5,
-                                labels = c("None","Uniform","N_heavy",
-                                           "E_heavy","S_heavy","W_heavy"))
-
 df <- df %>%
   mutate(group_key = paste(RelCompactness, WallArea, RoofArea,
                            OverallHeight, GlazingArea, GlazingAreaDist, sep = "_"))
@@ -515,6 +499,22 @@ results_HL <- rbind(results_HL,
   data.frame(Model = "Baseline OLS",
              RMSE = res_base_HL$rmse, MAE = res_base_HL$mae, R2 = res_base_HL$r2))
 ```
+For the Cooling Load, we have
+```{r reg-cooling-ols-baseline}
+y_train_CL <- df_train$CoolingLoad
+y_test_CL  <- df_test$CoolingLoad
+
+# Baseline OLS
+formula_base_CL <- CoolingLoad ~ RelCompactness + WallArea + RoofArea +
+                                  OverallHeight + GlazingArea +
+                                  GlazingAreaDist + Orientation
+lm_base_CL <- lm(formula_base_CL, data = df_train)
+pred_base_CL <- predict(lm_base_CL, newdata = df_test)
+res_base_CL  <- eval_reg(y_test_CL, pred_base_CL, "Baseline OLS")
+results_CL   <- rbind(results_CL,
+  data.frame(Model = "Baseline OLS",
+             RMSE = res_base_CL$rmse, MAE = res_base_CL$mae, R2 = res_base_CL$r2))
+```
 
 The baseline achieves R²=0.919 and RMSE=2.840 kWh/m². Despite the severe VIFs
 documented in the EDA, the overall fit is reasonable because R² aggregates all
@@ -549,7 +549,22 @@ results_HL <- rbind(results_HL,
              RMSE = res_interact_HL$rmse, MAE = res_interact_HL$mae,
              R2   = res_interact_HL$r2))
 ```
-
+For Cooling Load, we have
+```{r reg-cooling-ols-interactions}
+# OLS with interactions
+formula_interact_CL <- CoolingLoad ~ RelCompactness + WallArea + RoofArea +
+                                      OverallHeight + GlazingArea +
+                                      GlazingAreaDist + Orientation +
+                                      CompactnessXHeight + GlazingXHeight +
+                                      WallXGlazing + GlazingXCompactness
+lm_interact_CL <- lm(formula_interact_CL, data = df_train)
+pred_interact_CL <- predict(lm_interact_CL, newdata = df_test)
+res_interact_CL  <- eval_reg(y_test_CL, pred_interact_CL, "OLS with Interactions")
+results_CL <- rbind(results_CL,
+  data.frame(Model = "OLS with Interactions",
+             RMSE = res_interact_CL$rmse, MAE = res_interact_CL$mae,
+             R2   = res_interact_CL$r2))
+```
 The interaction model reduces RMSE from 2.840 to 2.470 (−13%) and improves R²
 from 0.919 to 0.939, confirming that the EDA crossing pattern reflects real
 structure. The `GlazingXHeight` coefficient is −1.20 (p=0.326, not significant),
@@ -589,6 +604,17 @@ results_HL <- rbind(results_HL,
   data.frame(Model = "Ridge Regression",
              RMSE = res_ridge_HL$rmse, MAE = res_ridge_HL$mae, R2 = res_ridge_HL$r2))
 ```
+For Cooling Load, we have
+```{r reg-cooling-ridge}
+# Ridge
+set.seed(42)
+ridge_cv_CL   <- cv.glmnet(X_train, y_train_CL, alpha = 0, nfolds = 10)
+pred_ridge_CL <- predict(ridge_cv_CL, newx = X_test, s = "lambda.1se")
+res_ridge_CL  <- eval_reg(y_test_CL, pred_ridge_CL, "Ridge Regression")
+results_CL <- rbind(results_CL,
+  data.frame(Model = "Ridge Regression",
+             RMSE = res_ridge_CL$rmse, MAE = res_ridge_CL$mae, R2 = res_ridge_CL$r2))
+```
 
 The coefficient path shows that `OverallHeight`, `GlazingXHeight`, and the
 dominant negative-coefficient feature shrink last, confirming their genuine
@@ -621,7 +647,21 @@ results_HL <- rbind(results_HL,
   data.frame(Model = "Lasso Regression",
              RMSE = res_lasso_HL$rmse, MAE = res_lasso_HL$mae, R2 = res_lasso_HL$r2))
 ```
-
+For Cooling Load, we have
+```{r reg-cooling-lasso}
+# Lasso
+set.seed(42)
+lasso_cv_CL   <- cv.glmnet(X_train, y_train_CL, alpha = 1, nfolds = 10)
+pred_lasso_CL <- predict(lasso_cv_CL, newx = X_test, s = "lambda.1se")
+res_lasso_CL  <- eval_reg(y_test_CL, pred_lasso_CL, "Lasso Regression")
+lasso_coefs_CL <- coef(lasso_cv_CL, s = "lambda.1se")
+selected_CL    <- rownames(lasso_coefs_CL)[lasso_coefs_CL[, 1] != 0]
+cat("\nLasso features retained (Cooling Load):\n")
+print(selected_CL)
+results_CL <- rbind(results_CL,
+  data.frame(Model = "Lasso Regression",
+             RMSE = res_lasso_CL$rmse, MAE = res_lasso_CL$mae, R2 = res_lasso_CL$r2))
+```
 Lasso zeroed 7 of 16 features for heating load and 6 of 16 for cooling load.
 The zeroed features for HL include `RelCompactness` and `GlazingArea` — two of
 the strongest physical predictors in the baseline OLS. This is not evidence those
@@ -653,9 +693,20 @@ results_HL <- rbind(results_HL,
   data.frame(Model = "Elastic Net",
              RMSE = res_enet_HL$rmse, MAE = res_enet_HL$mae, R2 = res_enet_HL$r2))
 ```
+For Cooling Load, we have
+```{r reg-cooling-elastic}
+# Elastic Net
+set.seed(42)
+enet_cv_CL   <- cv.glmnet(X_train, y_train_CL, alpha = 0.5, nfolds = 10)
+pred_enet_CL <- predict(enet_cv_CL, newx = X_test, s = "lambda.1se")
+res_enet_CL  <- eval_reg(y_test_CL, pred_enet_CL, "Elastic Net (alpha=0.5)")
+results_CL   <- rbind(results_CL,
+  data.frame(Model = "Elastic Net",
+             RMSE = res_enet_CL$rmse, MAE = res_enet_CL$mae, R2 = res_enet_CL$r2))
+```
 
 Elastic Net (RMSE=2.428) marginally outperforms OLS with interactions
-(RMSE=2.470) despite retaining 16 of 16 features — the L1 penalty is small
+(RMSE=2.470) despite retaining 16 of 16 features. The L1 penalty is small
 enough (λ=0.0034) that almost no zeroing occurs, and the benefit comes almost
 entirely from L2 shrinkage of the collinear geometric terms. This makes Elastic
 Net the best linear model for heating load. For cooling load, Ridge wins
@@ -687,69 +738,6 @@ consequence of the two-cluster data-generating process that linear models cannot
 fully resolve. It directly motivates the domain-appropriate regression models
 in Part 3, which can partition the feature space rather than imposing a global
 linear relationship.
-
-## All Models — Cooling Load
-
-```{r reg-cooling}
-y_train_CL <- df_train$CoolingLoad
-y_test_CL  <- df_test$CoolingLoad
-
-# Baseline OLS
-formula_base_CL <- CoolingLoad ~ RelCompactness + WallArea + RoofArea +
-                                  OverallHeight + GlazingArea +
-                                  GlazingAreaDist + Orientation
-lm_base_CL <- lm(formula_base_CL, data = df_train)
-pred_base_CL <- predict(lm_base_CL, newdata = df_test)
-res_base_CL  <- eval_reg(y_test_CL, pred_base_CL, "Baseline OLS")
-results_CL   <- rbind(results_CL,
-  data.frame(Model = "Baseline OLS",
-             RMSE = res_base_CL$rmse, MAE = res_base_CL$mae, R2 = res_base_CL$r2))
-
-# OLS with interactions
-formula_interact_CL <- CoolingLoad ~ RelCompactness + WallArea + RoofArea +
-                                      OverallHeight + GlazingArea +
-                                      GlazingAreaDist + Orientation +
-                                      CompactnessXHeight + GlazingXHeight +
-                                      WallXGlazing + GlazingXCompactness
-lm_interact_CL <- lm(formula_interact_CL, data = df_train)
-pred_interact_CL <- predict(lm_interact_CL, newdata = df_test)
-res_interact_CL  <- eval_reg(y_test_CL, pred_interact_CL, "OLS with Interactions")
-results_CL <- rbind(results_CL,
-  data.frame(Model = "OLS with Interactions",
-             RMSE = res_interact_CL$rmse, MAE = res_interact_CL$mae,
-             R2   = res_interact_CL$r2))
-
-# Ridge
-set.seed(42)
-ridge_cv_CL   <- cv.glmnet(X_train, y_train_CL, alpha = 0, nfolds = 10)
-pred_ridge_CL <- predict(ridge_cv_CL, newx = X_test, s = "lambda.1se")
-res_ridge_CL  <- eval_reg(y_test_CL, pred_ridge_CL, "Ridge Regression")
-results_CL <- rbind(results_CL,
-  data.frame(Model = "Ridge Regression",
-             RMSE = res_ridge_CL$rmse, MAE = res_ridge_CL$mae, R2 = res_ridge_CL$r2))
-
-# Lasso
-set.seed(42)
-lasso_cv_CL   <- cv.glmnet(X_train, y_train_CL, alpha = 1, nfolds = 10)
-pred_lasso_CL <- predict(lasso_cv_CL, newx = X_test, s = "lambda.1se")
-res_lasso_CL  <- eval_reg(y_test_CL, pred_lasso_CL, "Lasso Regression")
-lasso_coefs_CL <- coef(lasso_cv_CL, s = "lambda.1se")
-selected_CL    <- rownames(lasso_coefs_CL)[lasso_coefs_CL[, 1] != 0]
-cat("\nLasso features retained (Cooling Load):\n")
-print(selected_CL)
-results_CL <- rbind(results_CL,
-  data.frame(Model = "Lasso Regression",
-             RMSE = res_lasso_CL$rmse, MAE = res_lasso_CL$mae, R2 = res_lasso_CL$r2))
-
-# Elastic Net
-set.seed(42)
-enet_cv_CL   <- cv.glmnet(X_train, y_train_CL, alpha = 0.5, nfolds = 10)
-pred_enet_CL <- predict(enet_cv_CL, newx = X_test, s = "lambda.1se")
-res_enet_CL  <- eval_reg(y_test_CL, pred_enet_CL, "Elastic Net (alpha=0.5)")
-results_CL   <- rbind(results_CL,
-  data.frame(Model = "Elastic Net",
-             RMSE = res_enet_CL$rmse, MAE = res_enet_CL$mae, R2 = res_enet_CL$r2))
-```
 
 ## Linear Model Comparison
 
@@ -794,21 +782,21 @@ baselines to carry forward into Part 3 are Elastic Net for heating load
 
 ## Why These Models?
 
-The models in a conventional nonlinear analysis — Random Forest, XGBoost, SVM,
-Neural Network — are general-purpose algorithms. They work on almost any tabular
+The models in a conventional nonlinear analysis include Random Forest, XGBoost, SVM,
+Neural Network which are general-purpose algorithms. They work on almost any tabular
 dataset without needing to know what the data represents. That is both their
 strength and their limitation.
 
 ENB2012 was generated by EnergyPlus, a thermodynamic simulator, using the
 physics of heat transfer through building envelopes. The relationship between
-building geometry and energy load is not arbitrary — it follows physical laws.
+building geometry and energy load is not arbitrary as it follows physical laws.
 This creates two opportunities: (1) models suited to small, structured,
 simulation-generated datasets can extract more information from 768 rows than
 a general-purpose learner, and (2) models can be validated not just by test
 error but by checking whether predictions respect physical logic.
 
-**The linear baseline established in Part 2 — Elastic Net (HL RMSE=2.428) and
-Ridge (CL RMSE=2.888) — is the target these models are measured against.**
+**The linear baseline established in Part 2 was Elastic Net (HL RMSE=2.428) and
+Ridge (CL RMSE=2.888). This is the target these models are measured against.**
 
 Three models are introduced:
 
@@ -829,17 +817,7 @@ Three models are introduced:
 ```{r dom-reg-setup}
 # Reload the post-EDA dataset (features already engineered above;
 # reproduced here for standalone section clarity)
-df_gpr <- read_excel("ENB2012_post_EDA.xlsx")
-
-df_gpr$Orientation_f     <- factor(df_gpr$Orientation, levels = 2:5,
-                                    labels = c("N","E","S","W"))
-df_gpr$OverallHeight_f   <- factor(df_gpr$OverallHeight, levels = c(3.5,7.0),
-                                    labels = c("Low_3.5m","High_7m"))
-df_gpr$GlazingArea_f     <- factor(df_gpr$GlazingArea, levels = c(0,0.1,0.25,0.4),
-                                    labels = c("None","Low_10pct","Med_25pct","High_40pct"))
-df_gpr$GlazingAreaDist_f <- factor(df_gpr$GlazingAreaDist, levels = 0:5,
-                                    labels = c("None","Uniform","N_heavy",
-                                               "E_heavy","S_heavy","W_heavy"))
+df_gpr <- df
 
 df_gpr <- df_gpr %>%
   mutate(
@@ -924,7 +902,7 @@ k(x, x') = σ² × exp(−||x − x'||² / 2ℓ²)
 Both σ² (signal variance) and ℓ (length-scale) are estimated from the
 training data by maximising the marginal likelihood. Building heat transfer
 is governed by continuous physical equations, making the smoothness assumption
-physically reasonable for ENB2012.
+physically reasonable for the data.
 
 ```{r dom-gpr-rbf-y1}
 set.seed(42)
@@ -977,9 +955,9 @@ results_y2 <- rbind(results_y2,
 ## Model B — GPR with Laplace (Matérn ½) Kernel
 
 The Laplace kernel (Ornstein-Uhlenbeck / Matérn ν=1/2) assumes the underlying
-function is continuous but not differentiable — allowing for sharper transitions
-in the geometry-to-load relationship than the RBF kernel. ENB2012's features
-include discrete variables (`GlazingArea` takes only four values; `OverallHeight`
+function is continuous but not differentiable. This allows for sharper transitions
+in the geometry-to-load relationship than the RBF kernel. The data's features
+include discrete variables (`GlazingArea` takes only four values, `OverallHeight`
 only two), and the EnergyPlus outputs jump discontinuously between these levels
 rather than varying smoothly. The less-smooth Laplace kernel may handle these
 step-like patterns better than the infinitely smooth RBF kernel.
@@ -1062,7 +1040,7 @@ print(p_kernel_y1)
 LightGBM grows trees **leaf-wise**: at each step it finds the single leaf whose
 split would most reduce the loss and expands only that leaf. This produces
 deeper, more asymmetric trees that fit complex patterns more efficiently than
-depth-wise methods. For ENB2012 specifically, LightGBM's histogram-based
+depth-wise methods. For the data specifically, LightGBM's histogram-based
 split-finding algorithm naturally groups the few discrete feature values into
 bins before finding splits, aligning well with the dataset's structure.
 
@@ -1166,6 +1144,369 @@ results_y2 <- rbind(results_y2,
   eval_reg_dom(df_test_gpr$CoolingLoad, pred_lgbm_y2, "LightGBM"))
 ```
 
+## Model D — MARS (Multivariate Adaptive Regression Splines)
+
+The EDA established two facts that motivate MARS specifically: the response is
+bimodal at `OverallHeight = 7m`, and the `OverallHeight × GlazingArea`
+interaction plot shows a crossing pattern. Global linear terms average across
+both of these as they impose a single slope for `OverallHeight` across both
+height clusters and a single interaction coefficient that cannot shift at the
+crossing point.
+
+MARS addresses this by searching the training data for **knots** which are breakpoints
+where the feature-response relationship changes direction. It then fits
+piecewise-linear hinge functions of the form `max(0, x − t)` on either side.
+The model is built by a forward pass (adding hinges) followed by a backward
+pruning pass using GCV. `degree = 2` allows pairwise interaction hinges, which
+is physically motivated by the confirmed `OverallHeight × GlazingArea`
+crossing. The result is an explicit, printable formula. This is the only model in
+this analysis that a building engineer can audit without specialist software.
+
+```{r dom-mars-y1}
+library(earth)
+
+set.seed(42)
+mars_y1 <- earth(
+  x       = as.matrix(df_train_gpr[, features]),
+  y       = df_train_gpr$HeatingLoad,
+  degree  = 2,
+  nk      = 50,
+  thresh  = 0.001,
+  pmethod = "backward",
+  nfold   = 10,
+  keepxy  = TRUE
+)
+
+cat("=== MARS — Heating Load ===\n")
+print(summary(mars_y1, digits = 4))
+
+pred_mars_y1 <- predict(mars_y1,
+                         newdata = as.matrix(df_test_gpr[, features]))
+results_y1 <- rbind(results_y1,
+  eval_reg_dom(df_test_gpr$HeatingLoad, pred_mars_y1, "MARS"))
+
+mars_y1_df <- data.frame(
+  Actual    = df_test_gpr$HeatingLoad,
+  Predicted = as.vector(pred_mars_y1),
+  Residual  = df_test_gpr$HeatingLoad - as.vector(pred_mars_y1)
+)
+
+p1 <- ggplot(mars_y1_df, aes(x = Actual, y = Predicted)) +
+  geom_point(alpha = 0.6, colour = "steelblue", size = 2) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed",
+              colour = "black", linewidth = 0.8) +
+  labs(title = "MARS — Actual vs Predicted: Heating Load",
+       x = "Actual (kWh/m²)", y = "Predicted (kWh/m²)") +
+  theme_minimal()
+
+p2 <- ggplot(mars_y1_df, aes(x = Predicted, y = Residual)) +
+  geom_point(alpha = 0.6, colour = "steelblue", size = 2) +
+  geom_hline(yintercept = 0, linetype = "dashed",
+             colour = "black", linewidth = 0.8) +
+  labs(title = "MARS — Residuals: Heating Load",
+       x = "Predicted (kWh/m²)", y = "Residual") +
+  theme_minimal()
+
+grid.arrange(p1, p2, ncol = 2)
+
+# Variable importance: nsubsets = how consistently each feature was selected
+mars_imp_y1 <- earth::evimp(mars_y1)
+data.frame(
+  Feature   = rownames(mars_imp_y1),
+  nsubsets  = as.numeric(mars_imp_y1[, "nsubsets"]),
+  gcv       = as.numeric(mars_imp_y1[, "gcv"])
+) %>%
+  arrange(desc(nsubsets)) %>% head(12) %>%
+  ggplot(aes(x = reorder(Feature, nsubsets), y = nsubsets)) +
+  geom_col(fill = "steelblue", alpha = 0.8) +
+  geom_text(aes(label = nsubsets), hjust = -0.2, size = 3) +
+  coord_flip() +
+  labs(title    = "MARS — Variable Importance: Heating Load",
+       subtitle = "nsubsets = number of model subsets the feature appears in",
+       x = "Feature", y = "nsubsets") +
+  theme_minimal()
+```
+
+```{r dom-mars-y2}
+set.seed(42)
+mars_y2 <- earth(
+  x = as.matrix(df_train_gpr[, features]), y = df_train_gpr$CoolingLoad,
+  degree = 2, nk = 50, thresh = 0.001, pmethod = "backward",
+  nfold = 10, keepxy = TRUE
+)
+cat("=== MARS — Cooling Load ===\n")
+cat(sprintf("Terms retained after pruning: %d\n",
+            length(mars_y2$selected.terms)))
+pred_mars_y2 <- predict(mars_y2,
+                         newdata = as.matrix(df_test_gpr[, features]))
+results_y2 <- rbind(results_y2,
+  eval_reg_dom(df_test_gpr$CoolingLoad, pred_mars_y2, "MARS"))
+```
+
+---
+
+## Model E — Support Vector Regression (RBF Kernel)
+
+SVR finds a function that lies within an ε-wide tube around the training
+targets while minimising coefficient magnitude (the same L2 penalty as Ridge).
+Training points inside the tube contribute zero to the loss; only the
+**support vectors** outside the tube determine the boundary. Two properties
+of this loss make SVR well-suited to the data.
+
+First, SVR explicitly ignores errors below ε. The EnergyPlus simulator carries
+numerical precision limits of roughly ±0.5 kWh/m², treating sub-ε errors as
+zero aligns the loss with the actual resolution of the data. Second, because
+only boundary points drive the fit, SVR is less sensitive to the large number
+of near-duplicate points that the data's grid structure produces. The redundant
+interior buildings are discarded, leaving a sparser representation.
+
+Comparing SVR to GPR (both use an RBF kernel) directly tests whether the
+Bayesian treatment of uncertainty in GPR adds predictive value beyond the
+kernel choice alone. If their RMSEs are close, the kernel dominates; if GPR
+outperforms SVR substantially, the posterior uncertainty the GP maintains
+during fitting is helping it generalise from sparser regions of the grid.
+
+```{r dom-svr-y1}
+library(e1071)
+
+svr_grid <- expand.grid(C = c(1, 10, 100), epsilon = c(0.1, 0.5, 1.0))
+
+svr_tune_y1 <- purrr::pmap_dfr(svr_grid, function(C, epsilon) {
+  set.seed(42)
+  cv_errs <- sapply(1:5, function(fold) {
+    n   <- nrow(df_train_gpr)
+    idx <- sample(((seq_len(n) - 1) %% 5) + 1)
+    tr  <- df_train_gpr[idx != fold, ]
+    vl  <- df_train_gpr[idx == fold, ]
+    m   <- svm(x = as.matrix(tr[, features]), y = tr$HeatingLoad,
+               kernel = "radial", cost = C, epsilon = epsilon, scale = FALSE)
+    sqrt(mean((vl$HeatingLoad - predict(m, as.matrix(vl[, features])))^2))
+  })
+  data.frame(C = C, epsilon = epsilon, cv_rmse = round(mean(cv_errs), 5))
+})
+
+cat("=== SVR Tuning Grid — Heating Load ===\n")
+print(svr_tune_y1 %>% arrange(cv_rmse))
+
+best_svr_y1 <- svr_tune_y1[which.min(svr_tune_y1$cv_rmse), ]
+cat(sprintf("\nSelected: C = %g, epsilon = %g\n",
+            best_svr_y1$C, best_svr_y1$epsilon))
+
+set.seed(42)
+svr_y1 <- svm(
+  x = as.matrix(df_train_gpr[, features]), y = df_train_gpr$HeatingLoad,
+  kernel = "radial", cost = best_svr_y1$C, epsilon = best_svr_y1$epsilon,
+  scale = FALSE
+)
+
+cat(sprintf("Support vectors: %d / %d training points (%.1f%%)\n",
+            svr_y1$tot.nSV, nrow(df_train_gpr),
+            100 * svr_y1$tot.nSV / nrow(df_train_gpr)))
+
+pred_svr_y1 <- predict(svr_y1, newdata = as.matrix(df_test_gpr[, features]))
+results_y1  <- rbind(results_y1,
+  eval_reg_dom(df_test_gpr$HeatingLoad, pred_svr_y1, "SVR (RBF)"))
+
+# Actual vs predicted
+p_svr_y1 <- ggplot(
+  data.frame(Actual = df_test_gpr$HeatingLoad, Predicted = as.vector(pred_svr_y1)),
+  aes(x = Actual, y = Predicted)) +
+  geom_point(alpha = 0.6, colour = "steelblue", size = 2) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed",
+              colour = "black", linewidth = 0.8) +
+  labs(title = "SVR (RBF) — Actual vs Predicted: Heating Load",
+       x = "Actual (kWh/m²)", y = "Predicted (kWh/m²)") +
+  theme_minimal()
+
+# Support vector distribution — where in feature space are SVs concentrated?
+sv_flags <- rep("Non-SV", nrow(df_train_gpr))
+sv_flags[svr_y1$index] <- "Support Vector"
+
+p_sv <- data.frame(
+  OverallHeight = df_train_gpr$OverallHeight,
+  GlazingArea   = df_train_gpr$GlazingArea,
+  SV            = sv_flags
+) %>%
+  ggplot(aes(x = GlazingArea, y = OverallHeight, colour = SV, alpha = SV)) +
+  geom_jitter(width = 0.01, height = 0.05, size = 2) +
+  scale_colour_manual(values = c("Support Vector" = "tomato", "Non-SV" = "grey70")) +
+  scale_alpha_manual(values  = c("Support Vector" = 0.9, "Non-SV" = 0.3)) +
+  labs(title    = "SVR — Support Vector Distribution: Heating Load",
+       subtitle = "SVs define the model boundary; non-SVs inside ε-tube are discarded",
+       x = "GlazingArea (scaled)", y = "OverallHeight (scaled)",
+       colour = NULL, alpha = NULL) +
+  theme_minimal()
+
+grid.arrange(p_svr_y1, p_sv, ncol = 2)
+```
+
+
+```{r dom-svr-y2}
+svr_tune_y2 <- purrr::pmap_dfr(svr_grid, function(C, epsilon) {
+  set.seed(42)
+  cv_errs <- sapply(1:5, function(fold) {
+    n   <- nrow(df_train_gpr)
+    idx <- sample(((seq_len(n) - 1) %% 5) + 1)
+    tr  <- df_train_gpr[idx != fold, ]
+    vl  <- df_train_gpr[idx == fold, ]
+    m   <- svm(x = as.matrix(tr[, features]), y = tr$CoolingLoad,
+               kernel = "radial", cost = C, epsilon = epsilon, scale = FALSE)
+    sqrt(mean((vl$CoolingLoad - predict(m, as.matrix(vl[, features])))^2))
+  })
+  data.frame(C = C, epsilon = epsilon, cv_rmse = round(mean(cv_errs), 5))
+})
+
+best_svr_y2 <- svr_tune_y2[which.min(svr_tune_y2$cv_rmse), ]
+set.seed(42)
+svr_y2 <- svm(
+  x = as.matrix(df_train_gpr[, features]), y = df_train_gpr$CoolingLoad,
+  kernel = "radial", cost = best_svr_y2$C, epsilon = best_svr_y2$epsilon,
+  scale = FALSE
+)
+pred_svr_y2 <- predict(svr_y2, newdata = as.matrix(df_test_gpr[, features]))
+results_y2  <- rbind(results_y2,
+  eval_reg_dom(df_test_gpr$CoolingLoad, pred_svr_y2, "SVR (RBF)"))
+```
+
+---
+
+## Model F — Quantile Regression Forest
+
+Every model above returns a point prediction. For building energy performance
+certification, a point prediction is often insufficient since a contractor needs to
+know whether a building's predicted load of 14.2 kWh/m² is a confident Low
+classification or a borderline result where model uncertainty could flip the
+certificate. Point-prediction models cannot communicate this.
+
+The Quantile Regression Forest (QRF), extends the standard random forest by 
+storing all training outcomes at each leaf rather than their mean. At 
+prediction time, the weighted distribution of leaf outcomes gives a full 
+predictive distribution for each test building, from which any
+quantile can be extracted. The 10th–90th percentile interval is an 80%
+prediction interval: an honest statement of uncertainty that can be directly
+communicated to a building certifier.
+
+The **calibration plot** is the primary output. It tests whether stated
+intervals are honest. A nominal 80% interval should contain 80% of actual test
+buildings. An interval that empirically covers only 60% is overconfident and
+will systematically understate uncertainty at the class boundaries where it
+matters most.
+
+```{r dom-qrf-y1}
+
+set.seed(42)
+qrf_y1 <- quantile_forest(
+  X               = as.matrix(df_train_gpr[, features]),
+  Y               = df_train_gpr$HeatingLoad,
+  num.trees       = 500,
+  min.node.size   = 5,
+  sample.fraction = 0.8
+)
+
+preds_qrf_y1 <- predict(
+  qrf_y1,
+  newdata   = as.matrix(df_test_gpr[, features]),
+  quantiles = c(0.10, 0.50, 0.90)
+)$predictions
+colnames(preds_qrf_y1) <- c("q10", "q50", "q90")
+
+results_y1 <- rbind(results_y1,
+  eval_reg_dom(df_test_gpr$HeatingLoad, preds_qrf_y1[, "q50"],
+               "Quantile RF (median)"))
+
+qrf_y1_df <- data.frame(
+  Actual    = df_test_gpr$HeatingLoad,
+  q10       = preds_qrf_y1[, "q10"],
+  q50       = preds_qrf_y1[, "q50"],
+  q90       = preds_qrf_y1[, "q90"],
+  Covered   = (df_test_gpr$HeatingLoad >= preds_qrf_y1[, "q10"] &
+               df_test_gpr$HeatingLoad <= preds_qrf_y1[, "q90"]),
+  IntervalW = preds_qrf_y1[, "q90"] - preds_qrf_y1[, "q10"]
+)
+
+cat(sprintf("80%% interval coverage: %.1f%% (target: 80%%)\n",
+            100 * mean(qrf_y1_df$Covered)))
+cat(sprintf("Median interval width : %.3f kWh/m²\n",
+            median(qrf_y1_df$IntervalW)))
+
+# Interval plot: actual values with uncertainty bands
+qrf_y1_df %>%
+  arrange(Actual) %>%
+  mutate(idx = seq_len(n())) %>%
+  ggplot(aes(x = idx)) +
+  geom_ribbon(aes(ymin = q10, ymax = q90), fill = "steelblue", alpha = 0.3) +
+  geom_line(aes(y = q50), colour = "steelblue", linewidth = 0.7) +
+  geom_point(aes(y = Actual, colour = Covered), size = 1.5, alpha = 0.7) +
+  scale_colour_manual(values = c("TRUE" = "darkgreen", "FALSE" = "tomato"),
+                      name   = "Within 80% interval") +
+  labs(title    = "Quantile RF — 80% Prediction Intervals: Heating Load",
+       subtitle = "Shaded band = [10th, 90th] percentile; line = median;\nred points fall outside the stated interval",
+       x = "Test buildings (sorted by actual HL)",
+       y = "Heating Load (kWh/m²)") +
+  theme_minimal()
+
+# Calibration plot
+cal_data_y1 <- purrr::map_dfr(seq(0.05, 0.95, by = 0.05), function(alpha) {
+  lo_q <- (1 - alpha) / 2
+  hi_q <- 1 - lo_q
+  p    <- predict(qrf_y1,
+                  newdata   = as.matrix(df_test_gpr[, features]),
+                  quantiles = c(lo_q, hi_q))$predictions
+  data.frame(
+    nominal  = alpha,
+    empirical = mean(df_test_gpr$HeatingLoad >= p[, 1] &
+                     df_test_gpr$HeatingLoad <= p[, 2])
+  )
+})
+
+ggplot(cal_data_y1, aes(x = nominal, y = empirical)) +
+  geom_point(size = 2.5, colour = "steelblue") +
+  geom_line(colour = "steelblue", linewidth = 0.8) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed",
+              colour = "black", linewidth = 0.8) +
+  scale_x_continuous(labels = scales::percent) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title    = "Quantile RF — Calibration: Heating Load",
+       subtitle = "On the diagonal = honest intervals;\nabove = conservative (too wide); below = overconfident",
+       x = "Nominal coverage", y = "Empirical coverage") +
+  theme_minimal()
+
+# Interval width by actual load — uncertainty should peak at the height boundary
+ggplot(qrf_y1_df, aes(x = Actual, y = IntervalW)) +
+  geom_point(alpha = 0.5, colour = "steelblue", size = 1.8) +
+  geom_smooth(method = "loess", colour = "black", se = FALSE, linewidth = 0.8) +
+  labs(title    = "Quantile RF — Interval Width vs Actual Load: Heating Load",
+       subtitle = "Uncertainty should peak in the intermediate region between height clusters",
+       x = "Actual HeatingLoad (kWh/m²)",
+       y = "80% interval width (kWh/m²)") +
+  theme_minimal()
+```
+
+
+
+```{r dom-qrf-y2}
+set.seed(42)
+qrf_y2 <- quantile_forest(
+  X = as.matrix(df_train_gpr[, features]), Y = df_train_gpr$CoolingLoad,
+  num.trees = 500, min.node.size = 5, sample.fraction = 0.8
+)
+preds_qrf_y2 <- predict(
+  qrf_y2,
+  newdata   = as.matrix(df_test_gpr[, features]),
+  quantiles = c(0.10, 0.50, 0.90)
+)$predictions
+colnames(preds_qrf_y2) <- c("q10", "q50", "q90")
+
+cat(sprintf("80%% interval coverage (CL): %.1f%%\n",
+            100 * mean(df_test_gpr$CoolingLoad >= preds_qrf_y2[, "q10"] &
+                       df_test_gpr$CoolingLoad <= preds_qrf_y2[, "q90"])))
+
+results_y2 <- rbind(results_y2,
+  eval_reg_dom(df_test_gpr$CoolingLoad, preds_qrf_y2[, "q50"],
+               "Quantile RF (median)"))
+```
+The median prediction achieves RMSE = 1.111 and R² = 0.988, marginally better than both SVR and GPR RBF, with the small gain coming from storing full leaf distributions near the height-cluster boundary rather than just means. The more important result is the 80% interval coverage of 78.3%, which is within 1.7 percentage points of the stated target on a test set of 152 buildings and confirms the intervals are honest. At a median width of 1.015 kWh/m² they are also narrow enough to be useful: most buildings near a class boundary will have both interval bounds on the same side of the threshold, and only genuinely borderline cases will straddle it.
+
 ## Physics-Consistency Check
 
 A model can have low RMSE and still be physically wrong. This check evaluates
@@ -1242,23 +1583,24 @@ physics_results <- bind_rows(
 
 p_physics <- physics_results %>%
   pivot_longer(ends_with("_pct"), names_to = "Check", values_to = "Score") %>%
-  mutate(Check = recode(Check,
-    "Glazing_pct" = "Glazing → HL",
-    "Compact_pct" = "Compactness → HL",
-    "Height_pct"  = "Height → HL")) %>%
+  mutate(Check = case_when(
+    Check == "Glazing_pct" ~ "Glazing → HL",
+    Check == "Compact_pct" ~ "Compactness → HL",
+    Check == "Height_pct"  ~ "Height → HL",
+    TRUE ~ Check
+  )) %>%
   ggplot(aes(x = Model, y = Score, fill = Check)) +
   geom_col(position = "dodge", alpha = 0.85) +
   geom_text(aes(label = paste0(round(Score, 0), "%")),
             position = position_dodge(width = 0.9), vjust = -0.4, size = 3) +
   geom_hline(yintercept = 100, linetype = "dashed",
              colour = "darkgreen", linewidth = 0.7) +
-  scale_fill_manual(values = c("steelblue","tomato","goldenrod")) +
+  scale_fill_manual(values = c("steelblue", "tomato", "goldenrod")) +
   scale_y_continuous(limits = c(0, 115)) +
   labs(title    = "Physics-Consistency Check — Heating Load",
        subtitle = "% of building pairs where model predicts the physically correct direction",
        x = "Model", y = "Correct ordering (%)", fill = "Physical rule") +
   theme_minimal()
-print(p_physics)
 ```
 
 ## Domain Regression Model Comparison
@@ -1327,17 +1669,7 @@ with this ordinal structure:
 
 ```{r clf-targets}
 # Reload and re-engineer (classification shares the same feature pipeline)
-df_clf <- read_excel("ENB2012_post_EDA.xlsx")
-
-df_clf$Orientation_f     <- factor(df_clf$Orientation, levels = 2:5,
-                                    labels = c("N","E","S","W"))
-df_clf$OverallHeight_f   <- factor(df_clf$OverallHeight, levels = c(3.5,7.0),
-                                    labels = c("Low_3.5m","High_7m"))
-df_clf$GlazingArea_f     <- factor(df_clf$GlazingArea, levels = c(0,0.1,0.25,0.4),
-                                    labels = c("None","Low_10pct","Med_25pct","High_40pct"))
-df_clf$GlazingAreaDist_f <- factor(df_clf$GlazingAreaDist, levels = 0:5,
-                                    labels = c("None","Uniform","N_heavy",
-                                               "E_heavy","S_heavy","W_heavy"))
+df_clf <- df
 
 df_clf <- df_clf %>%
   mutate(
@@ -1382,8 +1714,8 @@ print(table(df_clf$CL_class))
 ```
 
 The tertile boundaries land very close to the EU Energy Performance of
-Buildings Directive thresholds (Low/Medium ≈ 14.5 vs EU 15 kWh/m²;
-Medium/High ≈ 28.6 vs EU 30 kWh/m²). This near-alignment is not coincidental —
+Buildings Directive thresholds (Low/Medium ≈ 14.5 vs EU 15 kWh/m²,
+Medium/High ≈ 28.6 vs EU 30 kWh/m²). This near-alignment is not coincidental as
 EnergyPlus simulates realistic performance ranges that naturally span the same
 territory energy standards were written to cover. It makes the standards-based
 classifier a meaningful comparison rather than a trivial one.
@@ -1408,7 +1740,7 @@ cat("Group overlap:", length(intersect(df_train_clf$group_key,
 ## Feature Set and Scaling
 
 `SurfaceArea` and `Orientation` are excluded. Orientation contributes less
-than 7% of within-group variance in the target — confirmed by the EDA and
+than 7% of within-group variance in the target which was confirmed by the EDA and
 consistent with its near-zero coefficients across all linear models. Scaling
 is fitted on training data only.
 
@@ -1658,193 +1990,10 @@ results_CL_clf <- rbind(results_CL_clf,
   data.frame(Model = "Ordinal Random Forest", Accuracy = orf_CL_result$accuracy))
 ```
 
-## Model 3 — Gaussian Naive Bayes with Physical Priors
-
-Naive Bayes estimates a mean and standard deviation for each feature within each
-energy class, then classifies by maximising the class posterior probability. The
-standard version estimates all parameters from data. The prior-blended version
-adjusts the class-conditional means for key features using physical reasoning:
-buildings in the Low energy class should tend toward high compactness (less
-envelope per unit volume), low glazing area (less conductive heat loss), and
-smaller height. The blend weight (30% prior, 70% data) keeps the model
-data-driven while preventing physically implausible patterns when data is limited.
-
-```{r clf-nb-hl}
-# ── Step 1: fit standard Gaussian Naive Bayes ──────────────────────────────────
-set.seed(42)
-gnb_y1 <- gaussian_naive_bayes(
-  x = as.matrix(train_HL[, features]),
-  y = train_HL$HL_class
-)
-
-# ── Step 2: define physical prior means (in standardised feature space) ────────
-# Low HL  → high compactness (+), low glazing (−), low height (−)
-# High HL → low compactness (−), high glazing (+), high height (+)
-physical_prior <- list(
-  Low    = list(RelCompactness=0.5,  GlazingArea=-0.5, OverallHeight=-0.5,
-                CompactnessXHeight=0.3, WallXGlazing=-0.4),
-  Medium = list(RelCompactness=0.0,  GlazingArea=0.0,  OverallHeight=0.0,
-                CompactnessXHeight=0.0, WallXGlazing=0.0),
-  High   = list(RelCompactness=-0.5, GlazingArea=0.5,  OverallHeight=0.5,
-                CompactnessXHeight=-0.3, WallXGlazing=0.4)
-)
-prior_weight <- 0.3
-blend_means  <- function(data_mean, prior_mean, w = prior_weight)
-  (1 - w) * data_mean + w * prior_mean
-
-# ── Step 3: floor SDs to prevent near-zero instability ────────────────────────
-gnb_means_y1 <- gnb_y1$params$mu
-gnb_sds_y1   <- gnb_y1$params$sd
-
-for (feat in colnames(gnb_sds_y1)) {
-  fallback <- max(sd(train_HL[[feat]], na.rm = TRUE) * 0.5, 0.1)
-  for (cls in rownames(gnb_sds_y1)) {
-    val <- gnb_sds_y1[cls, feat]
-    if (is.nan(val) || is.na(val) || val < 0.1) gnb_sds_y1[cls, feat] <- fallback
-  }
-}
-
-# ── Step 4: blend data means with physical priors for key features ─────────────
-prior_feats       <- c("RelCompactness","GlazingArea","OverallHeight",
-                        "CompactnessXHeight","WallXGlazing")
-gnb_means_std_y1  <- gnb_means_y1   # unblended copy for standard NB
-
-for (feat in prior_feats) {
-  if (!feat %in% colnames(gnb_means_y1)) next
-  for (cls in c("Low","Medium","High")) {
-    pv <- physical_prior[[cls]][[feat]]
-    if (!is.null(pv))
-      gnb_means_y1[cls, feat] <- blend_means(gnb_means_y1[cls, feat], pv)
-  }
-}
-
-# ── Step 5: manual log-likelihood prediction with blended parameters ───────────
-predict_gnb_blended <- function(x_mat, means_mat, sds_mat, classes) {
-  log_liks <- sapply(classes, function(cls) {
-    mu  <- means_mat[cls, ]
-    sig <- sds_mat[cls, ]
-    rowSums(mapply(function(x_col, m, s) dnorm(x_col, mean = m, sd = s, log = TRUE),
-                   as.data.frame(x_mat), mu, sig))
-  })
-  classes[apply(log_liks, 1, which.max)]
-}
-
-x_test_mat  <- as.matrix(test_HL[, features])
-classes_vec <- c("Low","Medium","High")
-
-pred_gnb_std_y1 <- predict_gnb_blended(
-  x_test_mat, gnb_means_std_y1, gnb_sds_y1, classes_vec
-) %>% factor(levels = classes_vec)
-
-pred_gnb_prior_y1 <- predict_gnb_blended(
-  x_test_mat, gnb_means_y1, gnb_sds_y1, classes_vec
-) %>% factor(levels = classes_vec)
-
-cat("--- Standard Naive Bayes (no prior) ---\n")
-gnb_std_result <- eval_clf(test_HL$HL_class, pred_gnb_std_y1,
-                            "Naive Bayes (standard)")
-cat("Confusion matrix:\n")
-print(gnb_std_result$confusion)
-
-cat("\n--- Naive Bayes with Physical Priors ---\n")
-gnb_prior_result <- eval_clf(test_HL$HL_class, pred_gnb_prior_y1,
-                              "Naive Bayes (physical prior)")
-cat("Confusion matrix:\n")
-print(gnb_prior_result$confusion)
-
-results_HL_clf <- rbind(results_HL_clf,
-  data.frame(Model = "Naive Bayes (standard)",       Accuracy = gnb_std_result$accuracy),
-  data.frame(Model = "Naive Bayes (physical prior)",  Accuracy = gnb_prior_result$accuracy)
-)
-
-# Prior effect plot
-data.frame(
-  Feature    = prior_feats,
-  Low_data   = as.numeric(gnb_y1$params$mu["Low",  prior_feats]),
-  Low_prior  = as.numeric(gnb_means_y1["Low",  prior_feats]),
-  High_data  = as.numeric(gnb_y1$params$mu["High", prior_feats]),
-  High_prior = as.numeric(gnb_means_y1["High", prior_feats])
-) %>%
-  pivot_longer(-Feature, names_to = "Type", values_to = "Mean") %>%
-  mutate(Class  = ifelse(grepl("Low",  Type), "Low",  "High"),
-         Source = ifelse(grepl("data", Type), "Data only", "With physical prior")) %>%
-  ggplot(aes(x = Feature, y = Mean, fill = Source, alpha = Class)) +
-  geom_col(position = "dodge") +
-  scale_alpha_manual(values = c("Low" = 0.6, "High" = 1.0)) +
-  scale_fill_manual(values = c("Data only" = "steelblue",
-                                "With physical prior" = "tomato")) +
-  geom_hline(yintercept = 0, linetype = "dashed") +
-  coord_flip() +
-  labs(title    = "Physical Prior Effect on Class-Conditional Means — Heating Load",
-       subtitle = "Bars show data-only vs prior-blended means (scaled feature space)",
-       x = "Feature", y = "Class-conditional mean (scaled)") +
-  theme_minimal()
-```
-
-```{r clf-nb-cl}
-# ── Cooling Load NB — same pipeline; CL prior reversal: glazing increases CL ──
-physical_prior_CL <- list(
-  Low    = list(RelCompactness=0.5,  GlazingArea=-0.5, OverallHeight=-0.4,
-                CompactnessXHeight=0.3, WallXGlazing=-0.3),
-  Medium = list(RelCompactness=0.0,  GlazingArea=0.0,  OverallHeight=0.0,
-                CompactnessXHeight=0.0, WallXGlazing=0.0),
-  High   = list(RelCompactness=-0.5, GlazingArea=0.5,  OverallHeight=0.4,
-                CompactnessXHeight=-0.3, WallXGlazing=0.3)
-)
-
-set.seed(42)
-gnb_y2 <- gaussian_naive_bayes(
-  x = as.matrix(train_CL[, features]),
-  y = train_CL$CL_class
-)
-
-gnb_means_y2     <- gnb_y2$params$mu
-gnb_means_std_y2 <- gnb_y2$params$mu
-gnb_sds_y2       <- gnb_y2$params$sd
-
-for (feat in colnames(gnb_sds_y2)) {
-  fallback <- max(sd(train_CL[[feat]], na.rm = TRUE) * 0.5, 0.1)
-  for (cls in rownames(gnb_sds_y2)) {
-    val <- gnb_sds_y2[cls, feat]
-    if (is.nan(val) || is.na(val) || val < 0.1) gnb_sds_y2[cls, feat] <- fallback
-  }
-}
-
-for (feat in prior_feats) {
-  if (!feat %in% colnames(gnb_means_y2)) next
-  for (cls in c("Low","Medium","High")) {
-    pv <- physical_prior_CL[[cls]][[feat]]
-    if (!is.null(pv))
-      gnb_means_y2[cls, feat] <- blend_means(gnb_means_y2[cls, feat], pv)
-  }
-}
-
-x_test_CL <- as.matrix(test_CL[, features])
-
-pred_gnb_std_y2 <- predict_gnb_blended(
-  x_test_CL, gnb_means_std_y2, gnb_sds_y2, classes_vec
-) %>% factor(levels = classes_vec)
-
-pred_gnb_prior_y2 <- predict_gnb_blended(
-  x_test_CL, gnb_means_y2, gnb_sds_y2, classes_vec
-) %>% factor(levels = classes_vec)
-
-cat("--- Standard Naive Bayes (no prior) — CL ---\n")
-gnb_std_CL  <- eval_clf(test_CL$CL_class, pred_gnb_std_y2, "Naive Bayes (standard)")
-cat("--- Naive Bayes with Physical Priors — CL ---\n")
-gnb_prior_CL <- eval_clf(test_CL$CL_class, pred_gnb_prior_y2,
-                          "Naive Bayes (physical prior)")
-
-results_CL_clf <- rbind(results_CL_clf,
-  data.frame(Model = "Naive Bayes (standard)",       Accuracy = gnb_std_CL$accuracy),
-  data.frame(Model = "Naive Bayes (physical prior)",  Accuracy = gnb_prior_CL$accuracy)
-)
-```
-
 ## Ordinal Error Analysis
 
 One advantage of ordinal classification is the ability to break errors down by
-severity. This section computes the error distance distribution — how many of
+severity. This section computes the error distance distribution by finding how many of
 each model's mistakes were one class off versus two classes off.
 
 ```{r clf-ordinal-errors}
@@ -1855,14 +2004,10 @@ ordinal_distance <- function(actual, predicted) {
 
 error_dist_HL <- data.frame(
   Model = c(rep("Standards-Based (EU)", nrow(test_HL)),
-            rep("Ordinal Random Forest", nrow(test_HL)),
-            rep("NB (standard)",         nrow(test_HL)),
-            rep("NB (physical prior)",   nrow(test_HL))),
+            rep("Ordinal Random Forest", nrow(test_HL))),
   Distance = c(
     ordinal_distance(test_HL$HL_class, standards_pred_HL),
-    ordinal_distance(test_HL$HL_class, pred_class_orf_y1),
-    ordinal_distance(test_HL$HL_class, pred_gnb_std_y1),
-    ordinal_distance(test_HL$HL_class, pred_gnb_prior_y1)
+    ordinal_distance(test_HL$HL_class, pred_class_orf_y1)
   )
 )
 
@@ -1998,51 +2143,11 @@ grid.arrange(p_all_HL, p_all_CL, ncol = 2)
 
 ## Conclusions
 
-The analysis proceeds through four interconnected stages, each motivating the
-next. The key findings and linkages are as follows.
-
-**From the EDA:** The dataset's combinatorial grid structure means all modelling
-must use group-aware splits to avoid orientation-sibling leakage. The bimodal
-response distributions, driven entirely by `OverallHeight`, and the severe VIF
-inflation (up to 212 for `RoofArea`) are the two facts that every modelling
-decision flows from.
-
-**From the linear models:** Regularisation delivers a measurable improvement
-over baseline OLS — 14.5% RMSE reduction for heating load and 8.6% for cooling
-load — confirming that the VIF-flagged collinearity was actively hurting raw OLS
-performance. The best linear models are Elastic Net for heating load
-(RMSE=2.428, R²=0.941) and Ridge for cooling load (RMSE=2.888, R²=0.903).
-The Breusch-Pagan test (BP=268.9, p<2.2e-16) confirms severe heteroscedasticity
-in the best linear model, a direct consequence of the two-height-cluster
-structure that linear methods cannot partition.
-
-**From the domain-appropriate regression models:** LightGBM substantially
-outperforms all linear baselines, achieving RMSE=0.519 for heating load
-(R²=0.997) and RMSE=1.640 for cooling load (R²=0.969). The GPR models offer
-a useful secondary finding: GPR (RBF) outperforms GPR (Laplace) for both
-targets, suggesting the geometry-to-load relationship is smoother than the
-step-like character of the discrete feature values implies. The physics
-consistency check confirms that all three domain models preserve the physically
-expected monotonic orderings for glazing, compactness, and height — they have
-not learned spurious patterns.
-
-**From the classification models:** The Ordinal Random Forest achieves
-substantially higher accuracy than the no-training Standards-Based classifier
-on both targets, quantifying the value that learning from data adds over domain
-rules alone. The Ranked Probability Score results show that the Ordinal Random
-Forest produces very few two-step errors, which is the property that matters
-most for practical building retrofit decisions. The prior-blended Naive Bayes
-demonstrates that physically motivated priors can be incorporated without
-large accuracy losses, offering a more interpretable model at a modest
-performance cost.
-
-**Overall:** For regression, LightGBM should be the model carried forward for
-building energy load prediction on ENB2012-like datasets. For classification,
-the Ordinal Random Forest is the preferred model, with the Standards-Based
-classifier retained as a benchmark for communicating the marginal value of
-machine learning over regulatory thresholds. In both cases, the domain-specific
-model design — group-aware splits, physics-consistent feature engineering, and
-ordinal-aware loss functions — contributed substantially more to performance
-than model family selection alone.
+The analysis started with a data quality problem and ended with near-perfect prediction accuracy, and the path between those two points was not accidental.
+The EDA established that the data's combinatorial grid structure required group-aware splitting to prevent orientation siblings leaking across the train/test boundary. It also flagged the two facts that every subsequent modelling decision had to account for: the bimodal response distributions driven entirely by OverallHeight, and VIF inflation reaching 212 for RoofArea. These were not incidental findings. They were the design brief for everything that followed.
+The linear models confirmed that collinearity was actively hurting raw OLS performance. Regularisation reduced heating load RMSE by 14.5% and cooling load RMSE by 8.6%, with Elastic Net and Ridge emerging as the best linear models respectively. The residual diagnostics then made the case for going further. A Breusch-Pagan statistic of 268.9 left no ambiguity as the two-height-cluster structure produce heteroscedasticity that no linear method can resolve by adjusting coefficients alone. The ceiling for linear models had been reached.
+The domain-appropriate models cleared that ceiling decisively. Every model in Part 3 outperformed every model in Part 2, with the gap widening as model complexity increased. MARS was the first to tell a physical story, placing a knot at the CompactnessXHeight boundary and fitting two separate slopes that directly addressed the heteroscedasticity the OLS diagnostics exposed. LightGBM set the accuracy ceiling at RMSE = 0.519 and R² = 0.997 for heating load, results that approach the numerical resolution of EnergyPlus itself. The cooling load picture was similar in direction but more compressed. MARS edged LightGBM at 1.539 vs 1.640, suggesting the cooling surface rewards the interpretable piecewise structure more than the tree-based one. The GPR comparison established that the RBF smoothness assumption was the right kernel choice, confirming the feature engineering had already linearised the main discontinuities before the kernel ever saw them. The Quantile RF added honest prediction intervals with 78.3% empirical coverage against an 80% target, narrow enough at a median width of 1.015 kWh/m² to support certification decisions at class boundaries.
+The classification results reinforced the regression story from a different angle. The Ordinal Random Forest substantially outperformed the Standards-Based classifier, quantifying the value that learning from data adds over applying regulatory thresholds directly. The low Ranked Probability Score confirmed that the few errors it did make were one-step rather than two-step, which matters most for retrofit prioritisation where misclassifying a High building as Low carries real consequences.
+The overall trajectory is the finding worth emphasising. The baseline OLS started at RMSE = 2.840 for heating load. The best model in the analysis finished at 0.519. That is an 81.7% reduction in error achieved not by trying every available algorithm but by following the data structure: group-aware splits because of the grid, regularisation because of the VIFs, nonlinear partitioning because of the height discontinuity, and kernel selection guided by what the feature engineering had already resolved. The domain-specific design choices contributed more to that trajectory than model family selection ever could have on its own.
 
 ---
